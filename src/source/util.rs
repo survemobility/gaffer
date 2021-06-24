@@ -1,9 +1,12 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::{
+    cmp::Reverse,
+    collections::{BTreeMap, VecDeque},
+};
 
 use crate::Prioritised;
 
 pub(crate) struct PriorityQueue<T: Prioritised> {
-    map: BTreeMap<T::Priority, VecDeque<T>>,
+    map: BTreeMap<Reverse<T::Priority>, VecDeque<T>>,
 }
 
 impl<T: Prioritised> PriorityQueue<T> {
@@ -14,7 +17,10 @@ impl<T: Prioritised> PriorityQueue<T> {
     }
 
     pub fn enqueue(&mut self, item: T) {
-        self.map.entry(item.priority()).or_default().push_back(item);
+        self.map
+            .entry(Reverse(item.priority()))
+            .or_default()
+            .push_back(item);
     }
 
     pub fn dequeue(&mut self) -> Option<T> {
@@ -52,7 +58,7 @@ pub(crate) struct Drain<'q, T: Prioritised> {
 }
 
 impl<'q, T: Prioritised> Drain<'q, T> {
-    fn peek(&self) -> Option<&T> {
+    pub fn peek(&self) -> Option<&T> {
         self.queue.first()
     }
 }
@@ -93,11 +99,11 @@ mod test {
     #[test]
     fn priority_queue_elements_come_out_prioritised_and_in_order() {
         let mut queue = PriorityQueue::new();
-        queue.enqueue(PrioritisedJob(1, 'a'));
-        queue.enqueue(PrioritisedJob(1, 'b'));
-        queue.enqueue(PrioritisedJob(2, 'd'));
-        queue.enqueue(PrioritisedJob(2, 'e'));
-        queue.enqueue(PrioritisedJob(1, 'c'));
+        queue.enqueue(PrioritisedJob(2, 'a'));
+        queue.enqueue(PrioritisedJob(2, 'b'));
+        queue.enqueue(PrioritisedJob(1, 'd'));
+        queue.enqueue(PrioritisedJob(1, 'e'));
+        queue.enqueue(PrioritisedJob(2, 'c'));
         let vals: String = queue.drain().map(|j| j.1).collect();
         assert_eq!(vals, "abcde");
     }
@@ -229,7 +235,7 @@ pub(crate) mod prioritized_mpsc {
             send.send(Tester(1)).unwrap();
             assert_eq!(
                 recv.recv_timeout(Duration::from_micros(1)).unwrap(),
-                Tester(1)
+                Tester(3)
             );
             assert_eq!(
                 recv.recv_timeout(Duration::from_micros(1)).unwrap(),
@@ -237,7 +243,7 @@ pub(crate) mod prioritized_mpsc {
             );
             assert_eq!(
                 recv.recv_timeout(Duration::from_micros(1)).unwrap(),
-                Tester(3)
+                Tester(1)
             );
         }
 
@@ -277,7 +283,7 @@ pub(crate) mod prioritized_mpsc {
                 .iter_timeout(Duration::from_millis(1))
                 .unwrap()
                 .collect();
-            assert_eq!(items, vec![Tester(1), Tester(2), Tester(3)]);
+            assert_eq!(items, vec![Tester(3), Tester(2), Tester(1)]);
         }
     }
 }

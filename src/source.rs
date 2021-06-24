@@ -1,4 +1,9 @@
-use std::{iter::Peekable, sync::mpsc::*, thread, time::{Duration, Instant}};
+use std::{
+    iter::Peekable,
+    sync::mpsc::*,
+    thread,
+    time::{Duration, Instant},
+};
 
 use crate::{Job, Prioritised};
 
@@ -12,13 +17,14 @@ struct SourceManager<J: Prioritised> {
 }
 
 impl<J: Prioritised + 'static> SourceManager<J> {
-    fn get(&mut self) -> Iter<'_, J>  {
+    fn get(&mut self) -> Iter<'_, J> {
         let queue = self.queue.iter_timeout(Duration::from_millis(1)).ok();
         let mut polls = Vec::with_capacity(self.sources.len());
         for PollSource {
             pollable,
             last_poll,
-        } in &mut self.sources {
+        } in &mut self.sources
+        {
             let interval_elapsed = Instant::now().duration_since(*last_poll);
             if interval_elapsed < pollable.preferred_interval {
                 thread::sleep(pollable.preferred_interval - interval_elapsed);
@@ -35,10 +41,7 @@ impl<J: Prioritised + 'static> SourceManager<J> {
                 Err(PollError::RetryNext) => break,
             }
         }
-        Iter {
-            queue,
-            polls,
-        }
+        Iter { queue, polls }
     }
 }
 
@@ -51,10 +54,26 @@ impl<'m, J: Prioritised> Iterator for Iter<'m, J> {
     type Item = J;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if let Some(queue) = &mut self.queue {
-            queue.next()
-        } else {
-            None
+        let highest_priority_poller = self
+            .polls
+            .iter_mut()
+            .map(|p| (p.peek().map(|j| j.priority()), p))
+            .min_by_key(|(priority, _p)| *priority);
+        match (highest_priority_poller, &mut self.queue) {
+            (Some((Some(priority), poller)), Some(queue)) => {
+                if let Some(next_queued) = queue.peek() {
+                    if next_queued.priority() > priority {
+                        queue.next()
+                    } else {
+                        poller.next()
+                    }
+                } else {
+                    poller.next()
+                }
+            }
+            (Some((_priority, poller)), None) => poller.next(),
+            (_, Some(queue)) => queue.next(),
+            (None, None) => None,
         }
     }
 }
@@ -112,7 +131,7 @@ mod test {
         send.send(Tester(1)).unwrap();
         assert_eq!(
             manager.get().collect::<Vec<_>>(),
-            vec![Tester(1), Tester(2), Tester(3)]
+            vec![Tester(3), Tester(2), Tester(1)]
         )
     }
 
@@ -128,8 +147,7 @@ mod test {
             sources: vec![PollSource {
                 last_poll: Instant::now() - Duration::from_secs(60),
                 pollable,
-            },
-            ],
+            }],
         };
         let before = Instant::now();
         assert_eq!(
@@ -151,8 +169,7 @@ mod test {
             sources: vec![PollSource {
                 last_poll: Instant::now() - Duration::from_secs(60),
                 pollable,
-            },
-            ],
+            }],
         };
         assert_eq!(
             manager.get().collect::<Vec<_>>(),
@@ -174,7 +191,7 @@ mod test {
     fn priority_order_across_sources() {
         let (send, recv) = util::prioritized_mpsc::channel();
         let pollable = PollableSource {
-            poll: Box::new(move || Ok(Box::new(vec![Tester(1), Tester(2), Tester(3)].into_iter()))),
+            poll: Box::new(move || Ok(Box::new(vec![Tester(3), Tester(2), Tester(1)].into_iter()))),
             min_interval: Duration::from_micros(100),
             preferred_interval: Duration::from_millis(1),
         };
@@ -184,14 +201,12 @@ mod test {
             sources: vec![PollSource {
                 last_poll: Instant::now() - Duration::from_secs(60),
                 pollable,
-            },
-            ],
+            }],
         };
         assert_eq!(
             manager.get().collect::<Vec<_>>(),
-            vec![Tester(1), Tester(2), Tester(2), Tester(3)]
+            vec![Tester(3), Tester(2), Tester(2), Tester(1)]
         );
-
     }
 
     // todo test round-robin and intervals
