@@ -104,35 +104,19 @@ impl<J: Job> WorkerState<J> {
     }
 
     fn is_not_started(&self) -> bool {
-        if let Self::NotStarted = self {
-            true
-        } else {
-            false
-        }
+        matches!(self, Self::NotStarted)
     }
 
     fn is_working(&self) -> bool {
-        if let Self::Working(_) = self {
-            true
-        } else {
-            false
-        }
+        matches!(self, Self::Working(_))
     }
 
     fn is_available(&self) -> bool {
-        if let Self::Available(_) = self {
-            true
-        } else {
-            false
-        }
+        matches!(self, Self::Available(_))
     }
 
     fn is_supervisor(&self) -> bool {
-        if let Self::Supervisor = self {
-            true
-        } else {
-            false
-        }
+        matches!(self, Self::Supervisor)
     }
 }
 

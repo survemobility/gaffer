@@ -5,20 +5,32 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{Job, Prioritised};
+use crate::Prioritised;
 
 use self::util::Drain;
 
 mod util;
 
-struct SourceManager<J: Prioritised> {
+/// Combines waiting on a channel with polling job sources, producing available jobs in priority order and aiming to be fair between sources
+pub struct SourceManager<J: Prioritised> {
     queue: util::prioritized_mpsc::Receiver<J>,
     sources: Vec<PollSource<J>>,
 }
 
 impl<J: Prioritised + 'static> SourceManager<J> {
-    fn get(&mut self) -> Iter<'_, J> {
-        let queue = self.queue.iter_timeout(Duration::from_millis(1)).ok();
+    /// Get the next batch of prioritised jobs
+    ///
+    /// Maximum wait duration would be the longest `preferred_interval` of all of the pollers, plus the time to poll each of the pollers. It could return immediately. It could return with no jobs. The caller should only iterate as many jobs as it can execute, the iterator should be dropped without iterating the rest.
+    pub fn get(&mut self) -> Iter<'_, J> {
+        let timeout = self.queue_timeout();
+        let queue = match self.queue.iter_timeout(timeout) {
+            Ok(jobs) => Some(jobs),
+            Err(RecvTimeoutError::Disconnected) => {
+                thread::sleep(timeout);
+                None
+            }
+            Err(RecvTimeoutError::Timeout) => None,
+        };
         let mut polls = Vec::with_capacity(self.sources.len());
         for PollSource {
             pollable,
@@ -26,8 +38,8 @@ impl<J: Prioritised + 'static> SourceManager<J> {
         } in &mut self.sources
         {
             let interval_elapsed = Instant::now().duration_since(*last_poll);
-            if interval_elapsed < pollable.preferred_interval {
-                thread::sleep(pollable.preferred_interval - interval_elapsed);
+            if interval_elapsed < pollable.min_interval {
+                continue;
             }
             match (pollable.poll)() {
                 Ok(jobs) => {
@@ -43,9 +55,39 @@ impl<J: Prioritised + 'static> SourceManager<J> {
         }
         Iter { queue, polls }
     }
+
+    /// get the timeout to wait for the queue based on the status of the pollers
+    fn queue_timeout(&mut self) -> Duration {
+        if self.poll_ready() {
+            // can poll immediately, won't sleep
+            Duration::from_millis(0)
+        } else if let Some(poll_time) = self.soonest_preferred_poll() {
+            poll_time
+                .checked_duration_since(Instant::now())
+                .unwrap_or_default()
+        } else {
+            Duration::from_secs(10) // there are no pollers so this is kinda abitrary
+        }
+    }
+
+    /// Checks whether at least one of the pollers has passed it's minimum poll interval
+    fn poll_ready(&self) -> bool {
+        let now = Instant::now();
+        self.sources
+            .iter()
+            .any(|poller| poller.last_poll + poller.pollable.min_interval < now)
+    }
+
+    /// The soonest interval when a poller would prefer to be polled, or `None` if there are no pollers
+    fn soonest_preferred_poll(&self) -> Option<Instant> {
+        self.sources
+            .iter()
+            .map(|poller| poller.last_poll + poller.pollable.preferred_interval)
+            .min()
+    }
 }
 
-struct Iter<'m, J: Prioritised> {
+pub struct Iter<'m, J: Prioritised> {
     queue: Option<Drain<'m, J>>,
     polls: Vec<Peekable<Box<dyn Iterator<Item = J> + 'm>>>,
 }
@@ -84,12 +126,14 @@ struct PollSource<J: Prioritised> {
 }
 
 struct PollableSource<J> {
-    poll: Box<dyn FnMut() -> Result<Box<dyn Iterator<Item = J>>, PollError>>,
+    poll: Box<dyn FnMut() -> PollOutput<J>>,
     /// Minimum interval between polls, if the manager is looking for jobs before this is up, this source will be skipped
     min_interval: Duration,
     /// Preferred interval between polls, if the manager is idle, it will schedule a poll on or before this interval
     preferred_interval: Duration,
 }
+
+type PollOutput<J> = Result<Box<dyn Iterator<Item = J>>, PollError>;
 
 impl<J> PollableSource<J> {}
 
@@ -102,7 +146,10 @@ enum PollError {
 
 #[cfg(test)]
 mod test {
-    use std::time::Duration;
+    use std::{
+        sync::{Arc, Barrier},
+        time::Duration,
+    };
 
     use crate::{Prioritised, UnrestrictedParallelism};
 
@@ -188,6 +235,28 @@ mod test {
     }
 
     #[test]
+    fn queue_received_during_poll_wait() {
+        let (send, recv) = util::prioritized_mpsc::channel();
+        let pollable = PollableSource {
+            poll: Box::new(move || Ok(Box::new(vec![Tester(1), Tester(2), Tester(3)].into_iter()))),
+            min_interval: Duration::from_millis(1),
+            preferred_interval: Duration::from_millis(2),
+        };
+        let mut manager = SourceManager {
+            queue: recv,
+            sources: vec![PollSource {
+                last_poll: Instant::now(),
+                pollable,
+            }],
+        };
+        thread::spawn(move || {
+            thread::sleep(Duration::from_micros(10));
+            send.send(Tester(2)).unwrap()
+        });
+        assert_eq!(manager.get().collect::<Vec<_>>(), vec![Tester(2)]);
+    }
+
+    #[test]
     fn priority_order_across_sources() {
         let (send, recv) = util::prioritized_mpsc::channel();
         let pollable = PollableSource {
@@ -209,5 +278,101 @@ mod test {
         );
     }
 
-    // todo test round-robin and intervals
+    #[test]
+    fn poll_ignored_in_cooloff() {
+        let (send, recv) = util::prioritized_mpsc::channel();
+        let pollable = PollableSource {
+            poll: Box::new(move || Ok(Box::new(vec![Tester(3), Tester(2), Tester(1)].into_iter()))),
+            min_interval: Duration::from_millis(1),
+            preferred_interval: Duration::from_millis(100),
+        };
+        send.send(Tester(2)).unwrap();
+        let mut manager = SourceManager {
+            queue: recv,
+            sources: vec![PollSource {
+                last_poll: Instant::now() - Duration::from_micros(500),
+                pollable,
+            }],
+        };
+        assert_eq!(manager.get().collect::<Vec<_>>(), vec![Tester(2)]);
+    }
+
+    #[test]
+    fn queue_not_awaited_with_ready_poll() {
+        let (send, recv) = util::prioritized_mpsc::channel();
+        let pollable = PollableSource {
+            poll: Box::new(move || Ok(Box::new(vec![Tester(3), Tester(2), Tester(1)].into_iter()))),
+            min_interval: Duration::from_millis(1),
+            preferred_interval: Duration::from_millis(100),
+        };
+        let mut manager = SourceManager {
+            queue: recv,
+            sources: vec![PollSource {
+                last_poll: Instant::now() - Duration::from_micros(5000),
+                pollable,
+            }],
+        };
+        let b1 = Arc::new(Barrier::new(2));
+        let b2 = b1.clone();
+        thread::spawn(move || {
+            b1.wait();
+            thread::sleep(Duration::from_micros(10));
+            send.send(Tester(2)).unwrap()
+        });
+        b2.wait();
+        assert_eq!(
+            manager.get().collect::<Vec<_>>(),
+            vec![Tester(3), Tester(2), Tester(1)]
+        );
+    }
+
+    #[test]
+    fn error_retry_next() {
+        let pollable = PollableSource::<Tester> {
+            poll: Box::new(move || Err(PollError::RetryNext)),
+            min_interval: Duration::from_millis(1),
+            preferred_interval: Duration::from_millis(2),
+        };
+        let mut manager = SourceManager {
+            queue: util::prioritized_mpsc::channel().1,
+            sources: vec![PollSource {
+                last_poll: Instant::now() - Duration::from_secs(60),
+                pollable,
+            }],
+        };
+        assert_eq!(manager.get().collect::<Vec<_>>(), vec![]);
+        let before = Instant::now();
+        assert_eq!(manager.get().collect::<Vec<_>>(), vec![]);
+        assert!(
+            Instant::now().duration_since(before) < Duration::from_micros(100),
+            "duration only : {:?}",
+            Instant::now().duration_since(before)
+        );
+    }
+
+    #[test]
+    fn error_reset_interval() {
+        let pollable = PollableSource::<Tester> {
+            poll: Box::new(move || Err(PollError::ResetInterval)),
+            min_interval: Duration::from_micros(50),
+            preferred_interval: Duration::from_micros(100),
+        };
+        let mut manager = SourceManager {
+            queue: util::prioritized_mpsc::channel().1,
+            sources: vec![PollSource {
+                last_poll: Instant::now() - Duration::from_secs(60),
+                pollable,
+            }],
+        };
+        assert_eq!(manager.get().collect::<Vec<_>>(), vec![]);
+        let before = Instant::now();
+        assert_eq!(manager.get().collect::<Vec<_>>(), vec![]);
+        assert!(
+            Instant::now().duration_since(before) > Duration::from_micros(100),
+            "duration only : {:?}",
+            Instant::now().duration_since(before)
+        );
+    }
+
+    // todo round-robin
 }

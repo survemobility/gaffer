@@ -24,7 +24,7 @@ impl<T: Prioritised> PriorityQueue<T> {
     }
 
     pub fn dequeue(&mut self) -> Option<T> {
-        for (_priority, queue) in &mut self.map {
+        for queue in self.map.values_mut() {
             if let Some(next) = queue.pop_front() {
                 return Some(next);
             }
@@ -43,7 +43,7 @@ impl<T: Prioritised> PriorityQueue<T> {
     }
 
     pub fn first(&self) -> Option<&T> {
-        for (_priority, queue) in &self.map {
+        for queue in self.map.values() {
             if let Some(next) = queue.front() {
                 return Some(next);
             }
