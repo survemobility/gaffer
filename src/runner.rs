@@ -1,11 +1,12 @@
 use std::{
     fmt::Debug,
+    iter,
     sync::{mpsc, Arc, Mutex},
-    thread,
+    thread::{self, JoinHandle},
     time::Duration,
 };
 
-use crate::{Job, Priority};
+use crate::{source::SourceManager, Job, Prioritised, Priority};
 
 struct RunnerState<J: Job> {
     workers: Arc<Mutex<Vec<WorkerState<J>>>>,
@@ -13,6 +14,16 @@ struct RunnerState<J: Job> {
 }
 
 impl<J: Job> RunnerState<J> {
+    pub fn new(num: usize) -> impl Iterator<Item = Self> {
+        let mut worker_state = vec![];
+        worker_state.extend(iter::repeat_with(|| WorkerState::NotStarted).take(num));
+        let worker_state = Arc::new(Mutex::new(worker_state));
+        (0..num).map(move |idx| Self {
+            workers: worker_state.clone(),
+            worker_index: idx,
+        })
+    }
+
     /// perform state transition after a job has been completed (or to start a worker)
     /// returns job receiver if this worker goes back to being available, or `None` if it becomes the supervisor
     ///
@@ -453,10 +464,7 @@ mod test {
     }
 }
 
-fn run<J: Job, Js: IntoIterator<Item = J>>(
-    state: RunnerState<J>,
-    jobs: Arc<Mutex<impl FnMut() -> Js>>,
-) {
+fn run<J: Job + 'static>(state: RunnerState<J>, jobs: Arc<Mutex<super::source::SourceManager<J>>>) {
     let mut fresh = true;
     loop {
         let job = if let Some(recv) = state.completed_job() {
@@ -474,7 +482,7 @@ fn run<J: Job, Js: IntoIterator<Item = J>>(
 
             let mut jobs = jobs.lock().unwrap();
             'supervisor_loop: loop {
-                if let Some(job) = state.assign_jobs((jobs)()) {
+                if let Some(job) = state.assign_jobs(jobs.get()) {
                     // become a worker
                     break 'supervisor_loop job;
                 }
@@ -482,4 +490,19 @@ fn run<J: Job, Js: IntoIterator<Item = J>>(
         };
         job.execute();
     }
+}
+
+pub fn spawn<J>(thread_num: usize, jobs: Arc<Mutex<SourceManager<J>>>) -> Vec<JoinHandle<()>>
+where
+    J: Job + 'static,
+    <J as Prioritised>::Priority: Send,
+{
+    RunnerState::new(thread_num)
+        .map(move |state| {
+            let jobs = jobs.clone();
+            thread::spawn(move || {
+                run(state, jobs);
+            })
+        })
+        .collect()
 }

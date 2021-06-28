@@ -139,18 +139,6 @@ pub(crate) mod prioritized_mpsc {
     }
 
     impl<T: Prioritised> Receiver<T> {
-        /// Waits up to `timeout` for a message if none are currently available, if some are available returns imediately with the highest priority message
-        pub fn recv_timeout(&mut self, timeout: Duration) -> Result<T, RecvTimeoutError> {
-            for item in self.recv.try_iter() {
-                self.queue.enqueue(item);
-            }
-            if let Some(item) = self.queue.dequeue() {
-                Ok(item)
-            } else {
-                self.recv.recv_timeout(timeout)
-            }
-        }
-
         /// Waits up to `timeout` for the first message, if none are currently available, if some are available it returns immediately with an iterator over the currently available messages in priority order, any items not iterated when the iterator is dropped are left
         pub(crate) fn iter_timeout(
             &mut self,
@@ -202,49 +190,6 @@ pub(crate) mod prioritized_mpsc {
             fn priority(&self) -> Self::Priority {
                 self.0.into()
             }
-        }
-
-        #[test]
-        fn recv_timeout_expires() {
-            let (_send, mut recv) = channel::<Tester>();
-            assert_eq!(
-                recv.recv_timeout(Duration::from_micros(1)).unwrap_err(),
-                RecvTimeoutError::Timeout
-            );
-        }
-
-        #[test]
-        fn recv_timeout_returns_immediately() {
-            let (send, mut recv) = channel::<Tester>();
-            thread::spawn(move || {
-                send.send(Tester(0)).unwrap();
-            });
-            let instant = Instant::now();
-            assert_eq!(
-                recv.recv_timeout(Duration::from_millis(1)).unwrap(),
-                Tester(0)
-            );
-            assert!(Instant::now().duration_since(instant) < Duration::from_millis(1));
-        }
-
-        #[test]
-        fn recv_timeout_bunch_of_items_are_prioritised() {
-            let (send, mut recv) = channel::<Tester>();
-            send.send(Tester(2)).unwrap();
-            send.send(Tester(3)).unwrap();
-            send.send(Tester(1)).unwrap();
-            assert_eq!(
-                recv.recv_timeout(Duration::from_micros(1)).unwrap(),
-                Tester(3)
-            );
-            assert_eq!(
-                recv.recv_timeout(Duration::from_micros(1)).unwrap(),
-                Tester(2)
-            );
-            assert_eq!(
-                recv.recv_timeout(Duration::from_micros(1)).unwrap(),
-                Tester(1)
-            );
         }
 
         #[test]

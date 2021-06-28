@@ -1,23 +1,34 @@
 use std::{
     iter::Peekable,
-    sync::mpsc::*,
+    sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
 
 use crate::Prioritised;
 
-use self::util::Drain;
+use self::util::{prioritized_mpsc, Drain};
 
 mod util;
 
 /// Combines waiting on a channel with polling job sources, producing available jobs in priority order and aiming to be fair between sources
 pub struct SourceManager<J: Prioritised> {
-    queue: util::prioritized_mpsc::Receiver<J>,
+    queue: prioritized_mpsc::Receiver<J>,
     sources: Vec<PollSource<J>>,
 }
 
-impl<J: Prioritised + 'static> SourceManager<J> {
+impl<J: Prioritised + Send + 'static> SourceManager<J> {
+    pub fn new(sources: Vec<PollSource<J>>) -> (mpsc::Sender<J>, SourceManager<J>) {
+        let (send, recv) = prioritized_mpsc::channel();
+        (
+            send,
+            SourceManager {
+                queue: recv,
+                sources,
+            },
+        )
+    }
+
     /// Get the next batch of prioritised jobs
     ///
     /// Maximum wait duration would be the longest `preferred_interval` of all of the pollers, plus the time to poll each of the pollers. It could return immediately. It could return with no jobs. The caller should only iterate as many jobs as it can execute, the iterator should be dropped without iterating the rest.
@@ -25,11 +36,11 @@ impl<J: Prioritised + 'static> SourceManager<J> {
         let timeout = self.queue_timeout();
         let queue = match self.queue.iter_timeout(timeout) {
             Ok(jobs) => Some(jobs),
-            Err(RecvTimeoutError::Disconnected) => {
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
                 thread::sleep(timeout);
                 None
             }
-            Err(RecvTimeoutError::Timeout) => None,
+            Err(mpsc::RecvTimeoutError::Timeout) => None,
         };
         let mut polls = Vec::with_capacity(self.sources.len());
         for PollSource {
@@ -60,7 +71,7 @@ impl<J: Prioritised + 'static> SourceManager<J> {
     fn queue_timeout(&mut self) -> Duration {
         if self.poll_ready() {
             // can poll immediately, won't sleep
-            Duration::from_millis(0)
+            Duration::ZERO
         } else if let Some(poll_time) = self.soonest_preferred_poll() {
             poll_time
                 .checked_duration_since(Instant::now())
@@ -120,24 +131,22 @@ impl<'m, J: Prioritised> Iterator for Iter<'m, J> {
     }
 }
 
-struct PollSource<J: Prioritised> {
-    pollable: PollableSource<J>,
-    last_poll: Instant,
+pub struct PollSource<J: Prioritised> {
+    pub pollable: PollableSource<J>,
+    pub last_poll: Instant,
 }
 
-struct PollableSource<J> {
-    poll: Box<dyn FnMut() -> PollOutput<J>>,
+pub struct PollableSource<J> {
+    pub poll: Box<dyn FnMut() -> PollOutput<J> + Send>,
     /// Minimum interval between polls, if the manager is looking for jobs before this is up, this source will be skipped
-    min_interval: Duration,
+    pub min_interval: Duration,
     /// Preferred interval between polls, if the manager is idle, it will schedule a poll on or before this interval
-    preferred_interval: Duration,
+    pub preferred_interval: Duration,
 }
 
-type PollOutput<J> = Result<Box<dyn Iterator<Item = J>>, PollError>;
+pub type PollOutput<J> = Result<Box<dyn Iterator<Item = J>>, PollError>;
 
-impl<J> PollableSource<J> {}
-
-enum PollError {
+pub enum PollError {
     /// No result was found for the poll, but the minimum poll interval should be observed before polling again
     ResetInterval,
     /// No result was found for the poll, continue for now but leave this source ready to poll
