@@ -13,7 +13,7 @@ use std::{
 
 use foreman::{
     source::{PollError, PollSource, PollableSource},
-    ExclusionOption, Job, JobRunner, Prioritised, UnrestrictedParallelism,
+    ExclusionOption, Job, JobRunner, MergeResult, Prioritised, UnrestrictedParallelism,
 };
 
 fn main() {
@@ -77,6 +77,17 @@ impl Prioritised for WaitJob {
     fn priority(&self) -> Self::Priority {
         self.1.into()
     }
+
+    const ATTEMPT_MERGE_INTO: Option<fn(Self, &mut Self) -> MergeResult<Self>> =
+        Some(|me: Self, other: &mut Self| -> MergeResult<Self> {
+            if me.1 == other.1 {
+                other.0 += me.0;
+                other.1 = other.1.max(me.1);
+                MergeResult::Success
+            } else {
+                MergeResult::NotMerged(me)
+            }
+        });
 }
 
 impl FromStr for WaitJob {

@@ -58,10 +58,20 @@ pub trait Job: Prioritised + Send {
     fn execute(self);
 }
 
-pub trait Prioritised {
+pub trait Prioritised: Sized {
     type Priority: Priority + Send;
 
     fn priority(&self) -> Self::Priority;
+
+    /// optional function to allow merging of jobs
+    const ATTEMPT_MERGE_INTO: Option<fn(Self, &mut Self) -> MergeResult<Self>> = None;
+}
+
+pub enum MergeResult<P> {
+    /// merge was sucessful, eg. either because the items are the same or one is a superset of the other
+    Success,
+    /// the attempted items were not suitable for merging
+    NotMerged(P),
 }
 
 pub trait Priority: Ord + Copy {

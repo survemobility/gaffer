@@ -3,7 +3,7 @@ use std::{
     collections::{BTreeMap, VecDeque},
 };
 
-use crate::Prioritised;
+use crate::{MergeResult, Prioritised};
 
 pub(crate) struct PriorityQueue<T: Prioritised> {
     map: BTreeMap<Reverse<T::Priority>, VecDeque<T>>,
@@ -16,7 +16,30 @@ impl<T: Prioritised> PriorityQueue<T> {
         }
     }
 
-    pub fn enqueue(&mut self, item: T) {
+    /// Enqueues the item so that it will be iterated before any existing items in the queue with a lower priority and after any existing items with the same or higher priority.
+    /// If `T` has a merge function in `T::ATTEMPT_MERGE_INTO`, the item will be merged into the highest priority existing item which merges successfully. The queue should maintain a state where everything that can be merged is merged, as long as the merge function is transitive in it's successes.
+    pub fn enqueue(&mut self, mut item: T) {
+        if let Some(attempt_merge) = T::ATTEMPT_MERGE_INTO {
+            for (Reverse(priority), bucket) in &mut self.map {
+                // for now we iterate ove the whole queue to look for merges, not the best solution
+                for (idx, existing) in bucket.iter_mut().enumerate() {
+                    match (attempt_merge)(item, existing) {
+                        MergeResult::NotMerged(the_item) => item = the_item,
+                        MergeResult::Success => {
+                            if &existing.priority() != priority {
+                                let item = bucket.remove(idx).unwrap();
+                                self.enqueue_internal(item);
+                            }
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        self.enqueue_internal(item);
+    }
+
+    pub fn enqueue_internal(&mut self, item: T) {
         self.map
             .entry(Reverse(item.priority()))
             .or_default()
@@ -75,7 +98,7 @@ impl<'q, T: Prioritised> Iterator for Drain<'q, T> {
 mod test {
     use super::*;
 
-    use crate::Priority;
+    use crate::{MergeResult, Priority};
 
     #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
     struct TestPriority(u8);
@@ -120,6 +143,43 @@ mod test {
         assert_eq!(drain.peek(), Some(&PrioritisedJob(1, 'b')));
         let vals: String = drain.map(|j| j.1).collect();
         assert_eq!(vals, "b");
+    }
+
+    #[derive(PartialEq, Eq, Debug)]
+    struct MergableJob(u8, char);
+
+    impl Prioritised for MergableJob {
+        type Priority = TestPriority;
+
+        fn priority(&self) -> Self::Priority {
+            TestPriority(self.0)
+        }
+
+        const ATTEMPT_MERGE_INTO: Option<fn(Self, &mut Self) -> MergeResult<Self>> =
+            Some(|me: Self, other: &mut Self| -> MergeResult<Self> {
+                if me.1 == other.1 {
+                    other.0 = other.0.max(me.0);
+                    MergeResult::Success
+                } else {
+                    MergeResult::NotMerged(me)
+                }
+            });
+    }
+
+    #[test]
+    fn priority_queue_elements_are_merged() {
+        let mut queue = PriorityQueue::new();
+        queue.enqueue(MergableJob(2, 'a'));
+        queue.enqueue(MergableJob(1, 'a'));
+        queue.enqueue(MergableJob(1, 'b'));
+        queue.enqueue(MergableJob(2, 'b'));
+        queue.enqueue(MergableJob(1, 'e'));
+        queue.enqueue(MergableJob(1, 'f'));
+        queue.enqueue(MergableJob(1, 'd'));
+        queue.enqueue(MergableJob(2, 'c'));
+        queue.enqueue(MergableJob(2, 'd'));
+        let vals: String = queue.drain().map(|j| j.1).collect();
+        assert_eq!(vals, "abcdef");
     }
 }
 
