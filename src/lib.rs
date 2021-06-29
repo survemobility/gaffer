@@ -4,7 +4,8 @@ use std::{
     thread::JoinHandle,
 };
 
-use source::{PollSource, SourceManager};
+use source::SourceManager;
+pub use source::{PollSource, PollableSource};
 
 mod runner;
 pub mod source;
@@ -39,15 +40,13 @@ impl<J: Job + 'static> Builder<J> {
     pub fn build(self, thread_num: usize) -> JobRunner<J> {
         let (sender, sources) = SourceManager::new(self.poll_sources);
         let jobs = Arc::new(Mutex::new(sources));
-        JobRunner {
-            threads: runner::spawn(thread_num, jobs),
-            sender,
-        }
+        let threads = runner::spawn(thread_num, jobs);
+        JobRunner { threads, sender }
     }
 }
 
 /// A job which can be executed by the runner, with features to synchronise jobs that would interfere with each other and reduce the parallelisation of low priority jobs
-pub trait Job: Prioritised + Send + Sync {
+pub trait Job: Prioritised + Send {
     type Exclusion: PartialEq + Copy + fmt::Debug + Send;
 
     /// exclude jobs which can't be run concurrently. if .`exclusion()` matches for 2 jobs, the runner won't run them at the same time

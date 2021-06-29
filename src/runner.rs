@@ -1,9 +1,8 @@
 use std::{
     fmt::Debug,
     iter,
-    sync::{mpsc, Arc, Mutex},
+    sync::{mpsc, Arc, Barrier, Mutex},
     thread::{self, JoinHandle},
-    time::Duration,
 };
 
 use crate::{source::SourceManager, Job, Prioritised, Priority};
@@ -14,13 +13,18 @@ struct RunnerState<J: Job> {
 }
 
 impl<J: Job> RunnerState<J> {
-    pub fn new(num: usize) -> impl Iterator<Item = Self> {
-        let mut worker_state = vec![];
-        worker_state.extend(iter::repeat_with(|| WorkerState::NotStarted).take(num));
+    pub fn new(num: usize) -> impl Iterator<Item = (mpsc::Receiver<J>, Self)> {
+        let (receivers, worker_state): (Vec<_>, _) =
+            iter::repeat_with(WorkerState::available).take(num).unzip();
         let worker_state = Arc::new(Mutex::new(worker_state));
-        (0..num).map(move |idx| Self {
-            workers: worker_state.clone(),
-            worker_index: idx,
+        receivers.into_iter().enumerate().map(move |(idx, recv)| {
+            (
+                recv,
+                Self {
+                    workers: worker_state.clone(),
+                    worker_index: idx,
+                },
+            )
         })
     }
 
@@ -30,9 +34,7 @@ impl<J: Job> RunnerState<J> {
     /// Panics if worker was not either working or not started
     fn completed_job(&self) -> Option<mpsc::Receiver<J>> {
         let mut workers = self.workers.lock().unwrap();
-        assert!(
-            workers[self.worker_index].is_working() || workers[self.worker_index].is_not_started()
-        );
+        assert!(workers[self.worker_index].is_working());
         if workers.iter().any(|worker| worker.is_supervisor()) {
             let (send, recv) = mpsc::channel();
             workers[self.worker_index] = WorkerState::Available(send);
@@ -41,6 +43,12 @@ impl<J: Job> RunnerState<J> {
             workers[self.worker_index] = WorkerState::Supervisor;
             None
         }
+    }
+
+    fn become_supervisor(&self) {
+        let mut workers = self.workers.lock().unwrap();
+        assert!(!workers.iter().any(|worker| worker.is_supervisor()));
+        workers[self.worker_index] = WorkerState::Supervisor;
     }
 
     /// assigns jobs to available workers, changing those workers into the `Working` state.
@@ -89,22 +97,21 @@ impl<J: Job> RunnerState<J> {
         }
         None
     }
-
-    fn is_warming_up(&self) -> bool {
-        let workers = self.workers.lock().unwrap();
-        workers.iter().any(|w| w.is_not_started())
-    }
 }
 
 #[derive(Debug)]
 enum WorkerState<J: Job> {
-    NotStarted,
     Supervisor,
     Working(J::Exclusion),
     Available(mpsc::Sender<J>),
 }
 
 impl<J: Job> WorkerState<J> {
+    fn available() -> (mpsc::Receiver<J>, Self) {
+        let (send, recv) = mpsc::channel();
+        (recv, Self::Available(send))
+    }
+
     /// if worker is working, returns the exclusion, otherwise `None`
     fn exclusion(&self) -> Option<J::Exclusion> {
         if let Self::Working(exclusion) = self {
@@ -114,16 +121,8 @@ impl<J: Job> WorkerState<J> {
         }
     }
 
-    fn is_not_started(&self) -> bool {
-        matches!(self, Self::NotStarted)
-    }
-
     fn is_working(&self) -> bool {
         matches!(self, Self::Working(_))
-    }
-
-    fn is_available(&self) -> bool {
-        matches!(self, Self::Available(_))
     }
 
     fn is_supervisor(&self) -> bool {
@@ -195,46 +194,6 @@ mod test {
 
     /// if a job completes and there is another supervisor, this worker becomes available
     #[test]
-    fn not_started_to_available() {
-        let state = RunnerState::<ExcludedJob> {
-            workers: Arc::new(Mutex::new(vec![
-                WorkerState::NotStarted,
-                WorkerState::Supervisor,
-            ])),
-            worker_index: 0,
-        };
-        assert!(state.is_warming_up());
-        let job_recv = state.completed_job();
-        assert!(job_recv.is_some());
-        {
-            let workers = state.workers.lock().unwrap();
-            assert!(workers[0].is_available());
-        }
-        assert!(!state.is_warming_up());
-    }
-
-    /// when the first runner starts it should become a supervisor
-    #[test]
-    fn not_started_to_supervisor() {
-        let state = RunnerState::<ExcludedJob> {
-            workers: Arc::new(Mutex::new(vec![
-                WorkerState::NotStarted,
-                WorkerState::NotStarted,
-            ])),
-            worker_index: 0,
-        };
-        assert!(state.is_warming_up());
-        let job_recv = state.completed_job();
-        assert!(job_recv.is_none());
-        {
-            let workers = state.workers.lock().unwrap();
-            assert!(workers[0].is_supervisor());
-        }
-        assert!(state.is_warming_up());
-    }
-
-    /// if a job completes and there is another supervisor, this worker becomes available
-    #[test]
     fn working_to_available() {
         let state = RunnerState::<ExcludedJob> {
             workers: Arc::new(Mutex::new(vec![
@@ -246,7 +205,7 @@ mod test {
         let job_recv = state.completed_job();
         assert!(job_recv.is_some());
         let workers = state.workers.lock().unwrap();
-        assert!(workers[0].is_available());
+        assert!(matches!(workers[0], WorkerState::Available(_)));
     }
 
     /// if a job completes and there is no other supervisor, this worker becomes a supervisor
@@ -327,7 +286,7 @@ mod test {
             let workers = state.workers.lock().unwrap();
             assert!(workers[0].is_supervisor());
             assert!(workers[1].is_working());
-            assert!(workers[2].is_available());
+            assert!(matches!(workers[2], WorkerState::Available(_)));
         }
         assert!(!assigned.load(atomic::Ordering::SeqCst));
         assert!(recv.try_recv().is_err());
@@ -357,7 +316,7 @@ mod test {
             let workers = state.workers.lock().unwrap();
             assert!(workers[0].is_supervisor());
             assert!(workers[1].is_working());
-            assert!(workers[2].is_available());
+            assert!(matches!(workers[2], WorkerState::Available(_)));
         }
         assert!(assigned1.load(atomic::Ordering::SeqCst));
         assert!(!assigned2.load(atomic::Ordering::SeqCst));
@@ -464,31 +423,42 @@ mod test {
     }
 }
 
-fn run<J: Job + 'static>(state: RunnerState<J>, jobs: Arc<Mutex<super::source::SourceManager<J>>>) {
-    let mut fresh = true;
+fn run<J: Job + 'static>(
+    state: RunnerState<J>,
+    jobs: Arc<Mutex<super::source::SourceManager<J>>>,
+    ready_barrier: Arc<Barrier>,
+    recv: mpsc::Receiver<J>,
+) {
+    let mut job = if ready_barrier.wait().is_leader() {
+        // become the supervisor
+        state.become_supervisor();
+        run_supervisor(&state, &jobs)
+    } else {
+        // worker is available
+        recv.recv().unwrap()
+    };
+    drop(recv);
     loop {
-        let job = if let Some(recv) = state.completed_job() {
+        job.execute();
+        job = if let Some(recv) = state.completed_job() {
             // worker is available
             recv.recv().unwrap()
         } else {
-            // worker is supervisor
-            // when the runner is warming up, it should let the other workers start before scheduling jobs
-            if fresh {
-                while state.is_warming_up() {
-                    thread::sleep(Duration::from_millis(1));
-                }
-                fresh = false;
-            }
-
-            let mut jobs = jobs.lock().unwrap();
-            'supervisor_loop: loop {
-                if let Some(job) = state.assign_jobs(jobs.get()) {
-                    // become a worker
-                    break 'supervisor_loop job;
-                }
-            }
+            run_supervisor(&state, &jobs)
         };
-        job.execute();
+    }
+}
+
+fn run_supervisor<J: Job + 'static>(
+    state: &RunnerState<J>,
+    jobs: &Arc<Mutex<super::source::SourceManager<J>>>,
+) -> J {
+    let mut jobs = jobs.lock().unwrap();
+    loop {
+        if let Some(job) = state.assign_jobs(jobs.get()) {
+            // become a worker
+            return job;
+        }
     }
 }
 
@@ -497,11 +467,13 @@ where
     J: Job + 'static,
     <J as Prioritised>::Priority: Send,
 {
+    let barrier = Arc::new(Barrier::new(thread_num));
     RunnerState::new(thread_num)
-        .map(move |state| {
+        .map(move |(recv, state)| {
             let jobs = jobs.clone();
+            let barrier = barrier.clone();
             thread::spawn(move || {
-                run(state, jobs);
+                run(state, jobs, barrier, recv);
             })
         })
         .collect()

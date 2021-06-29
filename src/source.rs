@@ -317,7 +317,7 @@ mod test {
         let mut manager = SourceManager {
             queue: recv,
             sources: vec![PollSource {
-                last_poll: Instant::now() - Duration::from_micros(5000),
+                last_poll: Instant::now() - Duration::from_millis(5),
                 pollable,
             }],
         };
@@ -325,7 +325,7 @@ mod test {
         let b2 = b1.clone();
         thread::spawn(move || {
             b1.wait();
-            thread::sleep(Duration::from_micros(10));
+            thread::sleep(Duration::from_millis(5));
             send.send(Tester(2)).unwrap()
         });
         b2.wait();

@@ -31,6 +31,9 @@ fn main() {
     let stdin = std::io::stdin();
     let mut input = String::new();
     while let Ok(_) = stdin.read_line(&mut input) {
+        if input == "\n" {
+            return;
+        }
         if let Ok(job) = input.parse() {
             runner.send(job).unwrap()
         }
@@ -53,28 +56,6 @@ fn poll_file() -> Result<Box<dyn Iterator<Item = WaitJob>>, PollError> {
 #[derive(Debug)]
 struct WaitJob(Duration, u8, Option<char>);
 
-impl FromStr for WaitJob {
-    type Err = ();
-
-    fn from_str(line: &str) -> Result<WaitJob, ()> {
-        let mut split = line.trim().split_whitespace();
-        if let Some(duration) = split.next() {
-            match duration.parse() {
-                Ok(duration) => {
-                    let mut job = WaitJob(Duration::from_secs(duration), 1, None);
-                    if let Some(priority) = split.next().and_then(|token| token.parse().ok()) {
-                        job.1 = priority;
-                    }
-                    job.2 = split.next().and_then(|token| token.parse().ok());
-                    return Ok(job);
-                }
-                errs => println!("Errors parsing duration {:?}: {:?}", duration, errs),
-            }
-        }
-        Err(())
-    }
-}
-
 impl Job for WaitJob {
     type Exclusion = ExclusionOption<char>;
 
@@ -95,5 +76,27 @@ impl Prioritised for WaitJob {
 
     fn priority(&self) -> Self::Priority {
         self.1.into()
+    }
+}
+
+impl FromStr for WaitJob {
+    type Err = ();
+
+    fn from_str(line: &str) -> Result<WaitJob, ()> {
+        let mut split = line.trim().split_whitespace();
+        if let Some(duration) = split.next() {
+            match duration.parse() {
+                Ok(duration) => {
+                    let mut job = WaitJob(Duration::from_secs(duration), 1, None);
+                    if let Some(priority) = split.next().and_then(|token| token.parse().ok()) {
+                        job.1 = priority;
+                    }
+                    job.2 = split.next().and_then(|token| token.parse().ok());
+                    return Ok(job);
+                }
+                errs => println!("Errors parsing duration {:?}: {:?}", duration, errs),
+            }
+        }
+        Err(())
     }
 }
