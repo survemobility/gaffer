@@ -160,7 +160,7 @@ mod test {
         time::Duration,
     };
 
-    use crate::{Prioritised, UnrestrictedParallelism};
+    use crate::Prioritised;
 
     use super::*;
 
@@ -168,10 +168,10 @@ mod test {
     struct Tester(u8);
 
     impl Prioritised for Tester {
-        type Priority = UnrestrictedParallelism<u8>;
+        type Priority = u8;
 
         fn priority(&self) -> Self::Priority {
-            self.0.into()
+            self.0
         }
     }
 

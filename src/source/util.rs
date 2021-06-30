@@ -98,24 +98,19 @@ impl<'q, T: Prioritised> Iterator for Drain<'q, T> {
 mod test {
     use super::*;
 
-    use crate::{MergeResult, Priority};
+    use crate::MergeResult;
 
     #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
     struct TestPriority(u8);
-    impl Priority for TestPriority {
-        fn parrallelism(&self) -> Option<u8> {
-            Some(self.0)
-        }
-    }
 
     #[derive(PartialEq, Eq, Debug)]
     struct PrioritisedJob(u8, char);
 
     impl Prioritised for PrioritisedJob {
-        type Priority = TestPriority;
+        type Priority = u8;
 
         fn priority(&self) -> Self::Priority {
-            TestPriority(self.0)
+            self.0
         }
     }
 
@@ -237,15 +232,13 @@ pub(crate) mod prioritized_mpsc {
             time::{Duration, Instant},
         };
 
-        use crate::UnrestrictedParallelism;
-
         use super::*;
 
         #[derive(Debug, PartialEq, Eq)]
         struct Tester(u8);
 
         impl Prioritised for Tester {
-            type Priority = UnrestrictedParallelism<u8>;
+            type Priority = u8;
 
             fn priority(&self) -> Self::Priority {
                 self.0.into()

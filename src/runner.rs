@@ -5,24 +5,30 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use crate::{source::SourceManager, Job, Prioritised, Priority};
+use crate::{source::SourceManager, Job, Prioritised};
 
 struct RunnerState<J: Job> {
     workers: Arc<Mutex<Vec<WorkerState<J>>>>,
     worker_index: usize,
+    concurrency_limit: Arc<ConcurrencyLimitFn<J>>,
 }
 
 impl<J: Job> RunnerState<J> {
-    pub fn new(num: usize) -> impl Iterator<Item = (mpsc::Receiver<J>, Self)> {
+    pub fn new(
+        num: usize,
+        concurrency_limit: impl Into<Arc<ConcurrencyLimitFn<J>>>,
+    ) -> impl Iterator<Item = (mpsc::Receiver<J>, Self)> {
         let (receivers, worker_state): (Vec<_>, _) =
             iter::repeat_with(WorkerState::available).take(num).unzip();
         let worker_state = Arc::new(Mutex::new(worker_state));
+        let concurrency_limit = concurrency_limit.into();
         receivers.into_iter().enumerate().map(move |(idx, recv)| {
             (
                 recv,
                 Self {
                     workers: worker_state.clone(),
                     worker_index: idx,
+                    concurrency_limit: concurrency_limit.clone(),
                 },
             )
         })
@@ -65,8 +71,8 @@ impl<J: Job> RunnerState<J> {
         let mut working_count = workers.iter().filter(|state| state.is_working()).count();
         let mut workers_iter = workers.iter_mut();
         for job in jobs {
-            if let Some(max_parallelism) = job.priority().parrallelism() {
-                if working_count as u8 >= max_parallelism {
+            if let Some(max_concurrency) = (self.concurrency_limit)(job.priority()) {
+                if working_count as u8 >= max_concurrency {
                     continue;
                 }
             }
@@ -129,7 +135,7 @@ impl<J: Job> WorkerState<J> {
 
 #[cfg(test)]
 mod test {
-    use crate::{Job, NoExclusion, Prioritised, Priority};
+    use crate::{Job, NoExclusion, Prioritised};
 
     use super::*;
 
@@ -151,14 +157,6 @@ mod test {
         fn priority(&self) -> Self::Priority {}
     }
 
-    #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
-    struct TestPriority(u8);
-    impl Priority for TestPriority {
-        fn parrallelism(&self) -> Option<u8> {
-            Some(self.0)
-        }
-    }
-
     struct PrioritisedJob(u8);
 
     impl Job for PrioritisedJob {
@@ -172,10 +170,10 @@ mod test {
     }
 
     impl Prioritised for PrioritisedJob {
-        type Priority = TestPriority;
+        type Priority = u8;
 
         fn priority(&self) -> Self::Priority {
-            TestPriority(self.0)
+            self.0
         }
     }
 
@@ -188,6 +186,7 @@ mod test {
                 WorkerState::Supervisor,
             ])),
             worker_index: 0,
+            concurrency_limit: Arc::new(|()| None),
         };
         let job_recv = state.completed_job();
         assert!(job_recv.is_some());
@@ -204,6 +203,7 @@ mod test {
                 WorkerState::Working(2),
             ])),
             worker_index: 0,
+            concurrency_limit: Arc::new(|()| None),
         };
         let job_recv = state.completed_job();
         assert!(job_recv.is_none());
@@ -221,6 +221,7 @@ mod test {
                 WorkerState::Available(send),
             ])),
             worker_index: 0,
+            concurrency_limit: Arc::new(|()| None),
         };
         assert!(state.assign_jobs(vec![ExcludedJob(1)]).is_none());
         let workers = state.workers.lock().unwrap();
@@ -238,6 +239,7 @@ mod test {
                 WorkerState::Working(1),
             ])),
             worker_index: 0,
+            concurrency_limit: Arc::new(|()| None),
         };
         assert!(state.assign_jobs(vec![ExcludedJob(2)]).is_some());
         let workers = state.workers.lock().unwrap();
@@ -256,6 +258,7 @@ mod test {
                 WorkerState::Available(send),
             ])),
             worker_index: 0,
+            concurrency_limit: Arc::new(|()| None),
         };
         assert!(state.assign_jobs(vec![ExcludedJob(1)]).is_none());
         {
@@ -278,6 +281,7 @@ mod test {
                 WorkerState::Available(send),
             ])),
             worker_index: 0,
+            concurrency_limit: Arc::new(|()| None),
         };
         assert!(state
             .assign_jobs(vec![ExcludedJob(1), ExcludedJob(1)])
@@ -301,6 +305,7 @@ mod test {
                 WorkerState::Working(NoExclusion),
             ])),
             worker_index: 0,
+            concurrency_limit: Arc::new(|priority| Some(priority)),
         };
         assert!(state.assign_jobs(vec![PrioritisedJob(1)]).is_none());
         {
@@ -319,6 +324,7 @@ mod test {
                 WorkerState::Working(NoExclusion),
             ])),
             worker_index: 0,
+            concurrency_limit: Arc::new(|priority| Some(priority)),
         };
         assert!(state.assign_jobs(vec![PrioritisedJob(2)]).is_some());
         {
@@ -339,6 +345,7 @@ mod test {
                 WorkerState::Available(send),
             ])),
             worker_index: 0,
+            concurrency_limit: Arc::new(|priority| Some(priority)),
         };
         assert!(state
             .assign_jobs(vec![PrioritisedJob(2), PrioritisedJob(2)])
@@ -362,6 +369,7 @@ mod test {
                 WorkerState::Working(NoExclusion),
             ])),
             worker_index: 0,
+            concurrency_limit: Arc::new(|priority| Some(priority)),
         };
         assert!(state.assign_jobs(&mut it).is_some());
         assert_eq!(it.count(), 1);
@@ -407,13 +415,20 @@ fn run_supervisor<J: Job + 'static>(
     }
 }
 
-pub fn spawn<J>(thread_num: usize, jobs: Arc<Mutex<SourceManager<J>>>) -> Vec<JoinHandle<()>>
+pub(crate) type ConcurrencyLimitFn<J> =
+    dyn Fn(<J as Prioritised>::Priority) -> Option<u8> + Send + Sync;
+
+pub fn spawn<J>(
+    thread_num: usize,
+    jobs: Arc<Mutex<SourceManager<J>>>,
+    concurrency_limit: Box<ConcurrencyLimitFn<J>>,
+) -> Vec<JoinHandle<()>>
 where
     J: Job + 'static,
     <J as Prioritised>::Priority: Send,
 {
     let barrier = Arc::new(Barrier::new(thread_num));
-    RunnerState::new(thread_num)
+    RunnerState::new(thread_num, concurrency_limit)
         .map(move |(recv, state)| {
             let jobs = jobs.clone();
             let barrier = barrier.clone();

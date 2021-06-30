@@ -214,7 +214,7 @@ impl Job for WaitJob {
 }
 
 impl Prioritised for WaitJob {
-    type Priority = UnrestrictedParallelism<u8>;
+    type Priority = u8;
 
     fn priority(&self) -> Self::Priority {
         self.priority.into()

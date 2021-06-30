@@ -4,6 +4,7 @@ use std::{
     thread::JoinHandle,
 };
 
+use runner::ConcurrencyLimitFn;
 use source::SourceManager;
 pub use source::{PollSource, PollableSource};
 
@@ -20,6 +21,7 @@ impl<J: Job + 'static> JobRunner<J> {
     pub fn builder() -> Builder<J> {
         Builder {
             poll_sources: vec![],
+            concurrency_limit: Box::new(|_: <J as Prioritised>::Priority| None as Option<u8>),
         }
     }
 
@@ -30,18 +32,29 @@ impl<J: Job + 'static> JobRunner<J> {
 
 pub struct Builder<J: Job + 'static> {
     poll_sources: Vec<PollSource<J>>,
+    concurrency_limit: Box<ConcurrencyLimitFn<J>>,
 }
 
 impl<J: Job + 'static> Builder<J> {
+    /// Poller that will be polled according to it's own schedule to find candidate jobs. Any
     pub fn add_poll(mut self, pollable: PollSource<J>) -> Self {
         self.poll_sources.push(pollable);
+        self
+    }
+
+    /// Function determining, for each priority, how many threads can be allocated to jobs of this priority, any remaining threads will be left idle to service higher-priority jobs. `None` means parallelism won't be limited
+    pub fn limit_concurrency(
+        mut self,
+        concurrency_limit: impl Fn(<J as Prioritised>::Priority) -> Option<u8> + Send + Sync + 'static,
+    ) -> Self {
+        self.concurrency_limit = Box::new(concurrency_limit);
         self
     }
 
     pub fn build(self, thread_num: usize) -> JobRunner<J> {
         let (sender, sources) = SourceManager::new(self.poll_sources);
         let jobs = Arc::new(Mutex::new(sources));
-        let threads = runner::spawn(thread_num, jobs);
+        let threads = runner::spawn(thread_num, jobs, self.concurrency_limit);
         JobRunner { threads, sender }
     }
 }
@@ -57,7 +70,7 @@ pub trait Job: Prioritised + Send {
 }
 
 pub trait Prioritised: Sized {
-    type Priority: Priority + Send;
+    type Priority: Ord + Copy + Send;
 
     fn priority(&self) -> Self::Priority;
 
@@ -70,31 +83,6 @@ pub enum MergeResult<P> {
     Success,
     /// the attempted items were not suitable for merging
     NotMerged(P),
-}
-
-pub trait Priority: Ord + Copy {
-    /// how many threads can be allocated to jobs of this priority, any remaining threads will be left idle to service higher-priority jobs. `None` means parallelism won't be limited
-    fn parrallelism(&self) -> Option<u8>;
-}
-
-/// No prioritisation
-impl Priority for () {
-    fn parrallelism(&self) -> Option<u8> {
-        None
-    }
-}
-
-#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
-pub struct UnrestrictedParallelism<T: Ord + Copy>(T);
-impl<T: Ord + Copy> Priority for UnrestrictedParallelism<T> {
-    fn parrallelism(&self) -> Option<u8> {
-        None
-    }
-}
-impl<T: Ord + Copy> From<T> for UnrestrictedParallelism<T> {
-    fn from(from: T) -> Self {
-        UnrestrictedParallelism(from)
-    }
 }
 
 /// Allows any jobs to run at the same time

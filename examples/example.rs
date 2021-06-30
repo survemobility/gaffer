@@ -13,7 +13,7 @@ use std::{
 
 use foreman::{
     source::{PollError, PollSource, PollableSource},
-    ExclusionOption, Job, JobRunner, MergeResult, Prioritised, UnrestrictedParallelism,
+    ExclusionOption, Job, JobRunner, MergeResult, Prioritised,
 };
 
 fn main() {
@@ -70,7 +70,7 @@ impl Job for WaitJob {
 }
 
 impl Prioritised for WaitJob {
-    type Priority = UnrestrictedParallelism<u8>;
+    type Priority = u8;
 
     fn priority(&self) -> Self::Priority {
         self.1.into()
