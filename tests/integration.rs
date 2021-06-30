@@ -206,8 +206,6 @@ impl Job for WaitJob {
         self.exclusion.into()
     }
 
-    fn assigned(&mut self) {}
-
     fn execute(self) {
         thread::sleep(self.duration);
         println!("Completed job {:?}", self);

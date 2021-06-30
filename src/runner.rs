@@ -54,7 +54,6 @@ impl<J: Job> RunnerState<J> {
     /// assigns jobs to available workers, changing those workers into the `Working` state.
     /// jobs are allocated to workers in order. jobs which clash with running exclusions are skipped. jobs whose priorities indicate a max number of threads below the number of working threads are skipped.
     /// skipped threads are dropped
-    /// calls `assigned()` on assigned jobs
     /// if there are still more jobs than available workers, the supervisor will also become a worker and the function returns the job it should execute
     /// unassigned jobs are not consumed
     ///
@@ -65,7 +64,7 @@ impl<J: Job> RunnerState<J> {
         let mut exclusions: Vec<_> = workers.iter().flat_map(|state| state.exclusion()).collect();
         let mut working_count = workers.iter().filter(|state| state.is_working()).count();
         let mut workers_iter = workers.iter_mut();
-        for mut job in jobs {
+        for job in jobs {
             if let Some(max_parallelism) = job.priority().parrallelism() {
                 if working_count as u8 >= max_parallelism {
                     continue;
@@ -80,7 +79,6 @@ impl<J: Job> RunnerState<J> {
                 if let Some(worker) = workers_iter.next() {
                     if let WorkerState::Available(send) = worker {
                         let exclusion = job.exclusion();
-                        job.assigned();
                         send.send(job).unwrap();
                         *worker = WorkerState::Working(exclusion);
                         break;
@@ -90,7 +88,6 @@ impl<J: Job> RunnerState<J> {
                 } else {
                     // no available worker for this job, supervisor to become worker
                     workers[self.worker_index] = WorkerState::Working(job.exclusion());
-                    job.assigned();
                     return Some(job);
                 }
             }
@@ -132,23 +129,17 @@ impl<J: Job> WorkerState<J> {
 
 #[cfg(test)]
 mod test {
-    use std::sync::atomic::{self, AtomicBool};
-
     use crate::{Job, NoExclusion, Prioritised, Priority};
 
     use super::*;
 
-    struct ExcludedJob(Arc<AtomicBool>, u8);
+    struct ExcludedJob(u8);
 
     impl Job for ExcludedJob {
         type Exclusion = u8;
 
         fn exclusion(&self) -> Self::Exclusion {
-            self.1
-        }
-
-        fn assigned(&mut self) {
-            self.0.store(true, atomic::Ordering::SeqCst);
+            self.0
         }
 
         fn execute(self) {}
@@ -168,17 +159,13 @@ mod test {
         }
     }
 
-    struct PrioritisedJob(Arc<AtomicBool>, u8);
+    struct PrioritisedJob(u8);
 
     impl Job for PrioritisedJob {
         type Exclusion = NoExclusion;
 
         fn exclusion(&self) -> Self::Exclusion {
             NoExclusion
-        }
-
-        fn assigned(&mut self) {
-            self.0.store(true, atomic::Ordering::SeqCst);
         }
 
         fn execute(self) {}
@@ -188,7 +175,7 @@ mod test {
         type Priority = TestPriority;
 
         fn priority(&self) -> Self::Priority {
-            TestPriority(self.1)
+            TestPriority(self.0)
         }
     }
 
@@ -227,7 +214,6 @@ mod test {
     /// when a job is assigned the state is switched to working and the job is sent over the channel
     #[test]
     fn available_to_working() {
-        let assigned = Arc::new(atomic::AtomicBool::new(false));
         let (send, recv) = mpsc::channel();
         let state = RunnerState::<ExcludedJob> {
             workers: Arc::new(Mutex::new(vec![
@@ -236,20 +222,16 @@ mod test {
             ])),
             worker_index: 0,
         };
-        assert!(state
-            .assign_jobs(vec![ExcludedJob(assigned.clone(), 1)])
-            .is_none());
+        assert!(state.assign_jobs(vec![ExcludedJob(1)]).is_none());
         let workers = state.workers.lock().unwrap();
         assert!(workers[0].is_supervisor());
         assert!(workers[1].is_working());
         assert!(recv.try_recv().is_ok());
-        assert!(assigned.load(atomic::Ordering::SeqCst));
     }
 
     /// if all threads are busy, a supervisor stops supervising and switch to working
     #[test]
     fn supervisor_to_working() {
-        let assigned = Arc::new(atomic::AtomicBool::new(false));
         let state = RunnerState::<ExcludedJob> {
             workers: Arc::new(Mutex::new(vec![
                 WorkerState::Supervisor,
@@ -257,19 +239,15 @@ mod test {
             ])),
             worker_index: 0,
         };
-        assert!(state
-            .assign_jobs(vec![ExcludedJob(assigned.clone(), 2)])
-            .is_some());
+        assert!(state.assign_jobs(vec![ExcludedJob(2)]).is_some());
         let workers = state.workers.lock().unwrap();
         assert!(workers[0].is_working());
         assert!(workers[1].is_working());
-        assert!(assigned.load(atomic::Ordering::SeqCst));
     }
 
     /// if a job's exclusion is equal to a running job, it should not be assigned
     #[test]
     fn equal_exclusion_running() {
-        let assigned = Arc::new(atomic::AtomicBool::new(false));
         let (send, recv) = mpsc::channel();
         let state = RunnerState::<ExcludedJob> {
             workers: Arc::new(Mutex::new(vec![
@@ -279,24 +257,19 @@ mod test {
             ])),
             worker_index: 0,
         };
-        assert!(state
-            .assign_jobs(vec![ExcludedJob(assigned.clone(), 1)])
-            .is_none());
+        assert!(state.assign_jobs(vec![ExcludedJob(1)]).is_none());
         {
             let workers = state.workers.lock().unwrap();
             assert!(workers[0].is_supervisor());
             assert!(workers[1].is_working());
             assert!(matches!(workers[2], WorkerState::Available(_)));
         }
-        assert!(!assigned.load(atomic::Ordering::SeqCst));
         assert!(recv.try_recv().is_err());
     }
 
     /// if 2 jobs are added with the same exclusion, only the first should be added
     #[test]
     fn equal_exclusion_adding() {
-        let assigned1 = Arc::new(atomic::AtomicBool::new(false));
-        let assigned2 = Arc::new(atomic::AtomicBool::new(false));
         let (send, recv) = mpsc::channel();
         let state = RunnerState::<ExcludedJob> {
             workers: Arc::new(Mutex::new(vec![
@@ -307,10 +280,7 @@ mod test {
             worker_index: 0,
         };
         assert!(state
-            .assign_jobs(vec![
-                ExcludedJob(assigned1.clone(), 1),
-                ExcludedJob(assigned2.clone(), 1)
-            ])
+            .assign_jobs(vec![ExcludedJob(1), ExcludedJob(1)])
             .is_none());
         {
             let workers = state.workers.lock().unwrap();
@@ -318,8 +288,6 @@ mod test {
             assert!(workers[1].is_working());
             assert!(matches!(workers[2], WorkerState::Available(_)));
         }
-        assert!(assigned1.load(atomic::Ordering::SeqCst));
-        assert!(!assigned2.load(atomic::Ordering::SeqCst));
         assert!(recv.try_recv().is_ok());
         assert!(recv.try_recv().is_err());
     }
@@ -327,7 +295,6 @@ mod test {
     /// a job with parrallelisation 1 won't be run if a worker is already working
     #[test]
     fn parallelisation_1_running_1() {
-        let assigned = Arc::new(atomic::AtomicBool::new(false));
         let state = RunnerState::<PrioritisedJob> {
             workers: Arc::new(Mutex::new(vec![
                 WorkerState::Supervisor,
@@ -335,21 +302,17 @@ mod test {
             ])),
             worker_index: 0,
         };
-        assert!(state
-            .assign_jobs(vec![PrioritisedJob(assigned.clone(), 1)])
-            .is_none());
+        assert!(state.assign_jobs(vec![PrioritisedJob(1)]).is_none());
         {
             let workers = state.workers.lock().unwrap();
             assert!(workers[0].is_supervisor());
             assert!(workers[1].is_working());
         }
-        assert!(!assigned.load(atomic::Ordering::SeqCst));
     }
 
     /// a job with parrallelisation 2 will be run if 1 worker is already working
     #[test]
     fn parallelisation_2_running_1() {
-        let assigned = Arc::new(atomic::AtomicBool::new(false));
         let state = RunnerState::<PrioritisedJob> {
             workers: Arc::new(Mutex::new(vec![
                 WorkerState::Supervisor,
@@ -357,22 +320,17 @@ mod test {
             ])),
             worker_index: 0,
         };
-        assert!(state
-            .assign_jobs(vec![PrioritisedJob(assigned.clone(), 2)])
-            .is_some());
+        assert!(state.assign_jobs(vec![PrioritisedJob(2)]).is_some());
         {
             let workers = state.workers.lock().unwrap();
             assert!(workers[0].is_working());
             assert!(workers[1].is_working());
         }
-        assert!(assigned.load(atomic::Ordering::SeqCst));
     }
 
     /// only one job with parrallelisation 2 will be run if 1 worker is already working
     #[test]
     fn parallelisation_2x2_running_1() {
-        let assigned1 = Arc::new(atomic::AtomicBool::new(false));
-        let assigned2 = Arc::new(atomic::AtomicBool::new(false));
         let (send, recv) = mpsc::channel();
         let state = RunnerState::<PrioritisedJob> {
             workers: Arc::new(Mutex::new(vec![
@@ -383,10 +341,7 @@ mod test {
             worker_index: 0,
         };
         assert!(state
-            .assign_jobs(vec![
-                PrioritisedJob(assigned1.clone(), 2),
-                PrioritisedJob(assigned2.clone(), 2)
-            ])
+            .assign_jobs(vec![PrioritisedJob(2), PrioritisedJob(2)])
             .is_none());
         {
             let workers = state.workers.lock().unwrap();
@@ -394,21 +349,13 @@ mod test {
             assert!(workers[1].is_working());
             assert!(workers[2].is_working());
         }
-        assert!(assigned1.load(atomic::Ordering::SeqCst));
-        assert!(!assigned2.load(atomic::Ordering::SeqCst));
         assert!(recv.try_recv().is_ok());
         assert!(recv.try_recv().is_err());
     }
 
     #[test]
     fn unassigned_jobs_not_consumed() {
-        let assigned1 = Arc::new(atomic::AtomicBool::new(false));
-        let assigned2 = Arc::new(atomic::AtomicBool::new(false));
-        let mut it = vec![
-            PrioritisedJob(assigned1.clone(), 100),
-            PrioritisedJob(assigned2.clone(), 100),
-        ]
-        .into_iter();
+        let mut it = vec![PrioritisedJob(100), PrioritisedJob(100)].into_iter();
         let state = RunnerState::<PrioritisedJob> {
             workers: Arc::new(Mutex::new(vec![
                 WorkerState::Supervisor,
@@ -418,8 +365,6 @@ mod test {
         };
         assert!(state.assign_jobs(&mut it).is_some());
         assert_eq!(it.count(), 1);
-        assert!(assigned1.load(atomic::Ordering::SeqCst));
-        assert!(!assigned2.load(atomic::Ordering::SeqCst));
     }
 }
 

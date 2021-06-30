@@ -5,28 +5,16 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::task::{Poll, Waker};
 
+/// The sending side of a promise which can be used to complete a future. If 2 promises are of the same type, they can be merged and then all the futures will be resolved with clones of the result.
 pub struct Promise<T> {
     shared: Arc<PromiseShared<T>>,
 }
+
+/// The receiving side of a promise which will be fulfilled by another thread. Unlike a regular `Future` if this is dropped the computation will continue. If the other end is dropped, this will complete with `Err(PromiseDropped)`
 pub struct PromiseFuture<T> {
     shared: Arc<PromiseShared<T>>,
 }
 
-pub struct PromiseFutureMulti<T> {
-    shared: Arc<PromiseShared<T>>,
-    waker_index: Option<usize>,
-}
-
-impl<T: Clone> Clone for PromiseFutureMulti<T> {
-    fn clone(&self) -> Self {
-        Self {
-            shared: self.shared.clone(),
-            waker_index: None,
-        }
-    }
-}
-
-// struct Promise<T>(Arc<Mutex<(Option<T>, Option<Waker>)>>);
 struct PromiseShared<T> {
     inner: Mutex<PromiseInner<T>>,
     promise_dropped: AtomicBool,
@@ -41,17 +29,18 @@ impl<T> Default for PromiseShared<T> {
     }
 }
 
-#[derive(Debug)]
 struct PromiseInner<T> {
     result: Option<T>,
-    wakers: Vec<Waker>, // the usual case is to have 0 or 1 wakers, more will only happen when merging. Ideally the first waker wouldn't require an allocation
+    waker: Option<Waker>,
+    merged: Vec<Promise<T>>,
 }
 
 impl<T> Default for PromiseInner<T> {
     fn default() -> Self {
         Self {
             result: None,
-            wakers: Vec::with_capacity(1),
+            waker: None,
+            merged: vec![],
         }
     }
 }
@@ -59,7 +48,7 @@ impl<T> Default for PromiseInner<T> {
 impl<T> Drop for Promise<T> {
     fn drop(&mut self) {
         self.shared.promise_dropped.store(true, Ordering::Release);
-        for waker in self.shared.inner.lock().unwrap().wakers.drain(..) {
+        if let Some(waker) = self.shared.inner.lock().unwrap().waker.take() {
             waker.wake();
         }
     }
@@ -68,11 +57,13 @@ impl<T> Drop for Promise<T> {
 unsafe impl<T: Send> Send for PromiseInner<T> {}
 unsafe impl<T: Send> Sync for PromiseInner<T> {}
 
+/// The promise was dropped and so a result will never be provided
 #[derive(Debug, PartialEq, Eq)]
 pub struct PromiseDropped;
 
-impl<T> Promise<T> {
-    fn new() -> (Promise<T>, PromiseFuture<T>) {
+impl<T: Clone> Promise<T> {
+    /// Create the sending and receiving parts of the promise.
+    pub fn new() -> (Promise<T>, PromiseFuture<T>) {
         let shared = Default::default();
         (
             Self {
@@ -82,23 +73,17 @@ impl<T> Promise<T> {
         )
     }
 
-    fn new_multi() -> (Promise<T>, PromiseFutureMulti<T>) {
-        let shared = Default::default();
-        (
-            Self {
-                shared: Arc::clone(&shared),
-            },
-            PromiseFutureMulti {
-                shared,
-                waker_index: None,
-            },
-        )
-    }
-
-    fn set_value(self, result: T) {
+    pub fn fulfill(self, result: T) {
         let mut data = self.shared.inner.lock().unwrap();
         // println!("Settign value on {:?}", (&data.result, &data.waker));
+        for merged_promise in data.merged.drain(..) {
+            merged_promise.fulfill(result.clone());
+        }
         data.result.replace(result);
+    }
+
+    pub fn merge(&mut self, other: Self) {
+        self.shared.inner.lock().unwrap().merged.push(other);
     }
 }
 
@@ -112,39 +97,7 @@ impl<T> Future for PromiseFuture<T> {
         } else if self.shared.promise_dropped.load(Ordering::Acquire) {
             Poll::Ready(Err(PromiseDropped))
         } else {
-            data.wakers.clear();
-            data.wakers.push(cx.waker().clone());
-            Poll::Pending
-        }
-    }
-}
-
-impl<T: Clone> Future for PromiseFutureMulti<T> {
-    type Output = Result<T, PromiseDropped>;
-
-    fn poll(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> Poll<Self::Output> {
-        let is_last = Arc::strong_count(&self.shared) == 1;
-        let mut data = self.shared.inner.lock().unwrap();
-        if let Some(result) = &data.result {
-            Poll::Ready(Ok(if is_last {
-                data.result.take().unwrap() // avoid unnecessary clone
-            } else {
-                result.clone()
-            }))
-        } else if self.shared.promise_dropped.load(Ordering::Acquire) {
-            Poll::Ready(Err(PromiseDropped))
-        } else {
-            if let Some(waker_idx) = self.waker_index {
-                data.wakers[waker_idx] = cx.waker().clone();
-            } else {
-                let waker_idx = data.wakers.len();
-                data.wakers.push(cx.waker().clone());
-                drop(data);
-                self.waker_index.replace(waker_idx);
-            }
+            data.waker.replace(cx.waker().clone());
             Poll::Pending
         }
     }
@@ -156,7 +109,7 @@ mod test {
 
     use futures::executor::block_on;
 
-    use crate::{Job, Prioritised};
+    use crate::{Job, MergeResult, Prioritised};
 
     use super::*;
 
@@ -167,10 +120,8 @@ mod test {
 
         fn exclusion(&self) -> Self::Exclusion {}
 
-        fn assigned(&mut self) {}
-
         fn execute(self) {
-            self.0.set_value(self.1)
+            self.0.fulfill(self.1)
         }
     }
 
@@ -178,6 +129,13 @@ mod test {
         type Priority = ();
 
         fn priority(&self) -> Self::Priority {}
+
+        const ATTEMPT_MERGE_INTO: Option<fn(Self, &mut Self) -> crate::MergeResult<Self>> =
+            Some(|this, target| {
+                target.1.push_str(&this.1);
+                target.0.merge(this.0);
+                MergeResult::Success
+            });
     }
 
     #[test]
@@ -213,74 +171,14 @@ mod test {
     }
 
     #[test]
-    fn test_multi_with_multi_result() {
-        let (promise, fut1) = Promise::new_multi();
-        let fut2 = fut1.clone();
-        let job = MyJob(promise, "hello".to_string());
+    fn test_merged_with_result() {
+        let (promise1, fut1) = Promise::new();
+        let (promise2, fut2) = Promise::new();
+        let mut job = MyJob(promise1, "hello".to_string());
+        let job2 = MyJob(promise2, "world".to_string());
+        (MyJob::ATTEMPT_MERGE_INTO.unwrap())(job2, &mut job);
         thread::spawn(move || job.execute());
-        assert_eq!(Ok("hello".to_string()), block_on(fut1));
-        assert_eq!(Ok("hello".to_string()), block_on(fut2));
-    }
-
-    #[test]
-    fn test_multi_with_multi_result_already() {
-        let (promise, fut1) = Promise::new_multi();
-        let fut2 = fut1.clone();
-        let job = MyJob(promise, "hello".to_string());
-        job.execute();
-        assert_eq!(Ok("hello".to_string()), block_on(fut1));
-        assert_eq!(Ok("hello".to_string()), block_on(fut2));
-    }
-
-    #[test]
-    fn test_multi_with_multi_drop() {
-        let (promise, fut1) = Promise::new_multi();
-        let fut2 = fut1.clone();
-        let job = MyJob(promise, "hello".to_string());
-        thread::spawn(move || drop(job));
-        assert_eq!(Err(PromiseDropped), block_on(fut1));
-        assert_eq!(Err(PromiseDropped), block_on(fut2));
-    }
-
-    #[test]
-    fn test_multi_with_multi_drop_already() {
-        let (promise, fut1) = Promise::new_multi();
-        let fut2 = fut1.clone();
-        let job = MyJob(promise, "hello".to_string());
-        drop(job);
-        assert_eq!(Err(PromiseDropped), block_on(fut1));
-        assert_eq!(Err(PromiseDropped), block_on(fut2));
-    }
-
-    #[test]
-    fn test_multi_with_result() {
-        let (promise, fut) = Promise::new_multi();
-        let job = MyJob(promise, "hello".to_string());
-        thread::spawn(move || job.execute());
-        assert_eq!(Ok("hello".to_string()), block_on(fut));
-    }
-
-    #[test]
-    fn test_multi_with_result_already() {
-        let (promise, fut) = Promise::new_multi();
-        let job = MyJob(promise, "hello".to_string());
-        job.execute();
-        assert_eq!(Ok("hello".to_string()), block_on(fut));
-    }
-
-    #[test]
-    fn test_multi_with_drop() {
-        let (promise, fut) = Promise::new_multi();
-        let job = MyJob(promise, "hello".to_string());
-        thread::spawn(move || drop(job));
-        assert_eq!(Err(PromiseDropped), block_on(fut));
-    }
-
-    #[test]
-    fn test_multi_with_drop_already() {
-        let (promise, fut) = Promise::new_multi();
-        let job = MyJob(promise, "hello".to_string());
-        drop(job);
-        assert_eq!(Err(PromiseDropped), block_on(fut));
+        assert_eq!(Ok("helloworld".to_string()), block_on(fut1));
+        assert_eq!(Ok("helloworld".to_string()), block_on(fut2));
     }
 }

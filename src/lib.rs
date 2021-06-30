@@ -53,9 +53,6 @@ pub trait Job: Prioritised + Send {
     /// exclude jobs which can't be run concurrently. if .`exclusion()` matches for 2 jobs, the runner won't run them at the same time
     fn exclusion(&self) -> Self::Exclusion;
 
-    /// called by the runner supervisor when assigned to a worker, immediately before execution
-    fn assigned(&mut self);
-
     fn execute(self);
 }
 

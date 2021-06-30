@@ -63,8 +63,6 @@ impl Job for WaitJob {
         self.2.into()
     }
 
-    fn assigned(&mut self) {}
-
     fn execute(self) {
         thread::sleep(self.0);
         println!("Completed job {:?}", self);
