@@ -5,3 +5,6 @@ authors = ["Mike Bush <mike@survemobility.com>"]
 edition = "2018"
 
 [dependencies]
+
+[dev-dependencies]
+futures = { version = "0.3.15", features = ["executor"] }

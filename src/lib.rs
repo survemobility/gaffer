@@ -7,6 +7,7 @@ use std::{
 use source::SourceManager;
 pub use source::{PollSource, PollableSource};
 
+pub mod future;
 mod runner;
 pub mod source;
 
