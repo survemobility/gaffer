@@ -1,3 +1,88 @@
+///! # foreman
+///!
+///! Prioritised, parallel job scheduler with concurrent exclusion, job merging, job source polling and load limiting for lower priorities.
+///!
+///! A job scheduler executes tasks on it's own thread or thread pool. This job scheduler is particularly designed to consider heavier weight or more expensive jobs, which likely have side effects.
+///!
+///! __Features__
+///!
+///! * Job polling: provide a function to poll & a polling interval range and foreman will poll within that range for jobs
+///! * Job queue: use an `std::sync::mpsc::Sender<YourJob>` to send jobs
+///! * Future Jobs: (Optionally) create `Future`s to get results from the jobs
+///! * Job prioritisation: provide a priority for jobs and all the jobs will be executed in that order
+///! * Job merging: merge identical / similar jobs in the queue to reduce workload
+///! * Parallel execution: run jobs on multiple threads and lock jobs which should be run exclusively, they remain in the queue and don't occupy other resources
+///! * Priority throttling: in order to have idle threads ready to pick up higher-priority jobs, throttle lower priority jobs by restricting them to a lower number of threads
+///! * No dependencies: only because no crates were found providing ready-built components that worked how they needed to for this crate
+///!
+///! ## Example
+///!
+///! [See `/examples/example.rs`](./examples/example.rs)
+///!
+///! ```rust
+///! #[derive(Debug)]
+///! struct WaitJob(Duration, u8, Option<char>);
+///!
+///! impl Job for WaitJob {
+///!     type Exclusion = ExclusionOption<char>;
+///!
+///!     fn exclusion(&self) -> Self::Exclusion {
+///!         self.2.into()
+///!     }
+///!
+///!     fn execute(self) {
+///!         thread::sleep(self.0);
+///!         println!("Completed job {:?}", self);
+///!     }
+///! }
+///!
+///! impl Prioritised for WaitJob {
+///!     type Priority = u8;
+///!
+///!     fn priority(&self) -> Self::Priority {
+///!         self.1.into()
+///!     }
+///!
+///!     const ATTEMPT_MERGE_INTO: Option<fn(Self, &mut Self) -> MergeResult<Self>> =
+///!         Some(|me: Self, other: &mut Self| -> MergeResult<Self> {
+///!             if me.1 == other.1 {
+///!                 other.0 += me.0;
+///!                 other.1 = other.1.max(me.1);
+///!                 MergeResult::Success
+///!             } else {
+///!                 MergeResult::NotMerged(me)
+///!             }
+///!         });
+///! }
+///! ```
+///!
+///! ## Capabilities
+///!
+///! ### Job polling
+///!
+///! Provide a function to poll & a polling interval range and foreman will poll within that range for jobs
+///!
+///! ```rust
+///! fn main() {
+///!     JobRunner::builder()
+///!         .add_poll(PollSource {
+///!             pollable: PollableSource {
+///!                 poll: Box::new(|| Ok(Box::new(vec![].into_iter())) ), // provide how to obtain the jobs
+///!                 min_interval: Duration::from_secs(20), // the poll function won't be called until at least this has elapsed past the `last_poll`
+///!                 preferred_interval: Duration::from_secs(30), // if the supervisor is idle, it will wait this long past `last_poll` before making a poll
+///!             },
+///!             last_poll: Instant::now() - Duration::from_secs(120), // updated each poll
+///!         })
+///!         .build(2);
+///! }
+///! ```
+///!
+///! ## Usage
+///!
+///! ```toml
+///! [dependencies]
+///! foreman = { git = "ssh://git@github.com/survemobility/foreman.git", branch = "pr-1" }
+///! ```
 use std::{
     fmt,
     sync::{mpsc, Arc, Mutex},
