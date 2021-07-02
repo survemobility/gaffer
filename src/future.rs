@@ -32,7 +32,7 @@ impl<T> Default for PromiseShared<T> {
 struct PromiseInner<T> {
     result: Option<T>,
     waker: Option<Waker>,
-    merged: Vec<Promise<T>>,
+    merged: Option<Promise<T>>,
 }
 
 impl<T> Default for PromiseInner<T> {
@@ -40,7 +40,7 @@ impl<T> Default for PromiseInner<T> {
         Self {
             result: None,
             waker: None,
-            merged: vec![],
+            merged: None,
         }
     }
 }
@@ -48,7 +48,9 @@ impl<T> Default for PromiseInner<T> {
 impl<T> Drop for Promise<T> {
     fn drop(&mut self) {
         self.shared.promise_dropped.store(true, Ordering::Release);
-        if let Some(waker) = self.shared.inner.lock().unwrap().waker.take() {
+        let mut data = self.shared.inner.lock().unwrap();
+        drop(data.merged.take());
+        if let Some(waker) = data.waker.take() {
             waker.wake();
         }
     }
@@ -75,15 +77,19 @@ impl<T: Clone> Promise<T> {
 
     pub fn fulfill(self, result: T) {
         let mut data = self.shared.inner.lock().unwrap();
-        // println!("Settign value on {:?}", (&data.result, &data.waker));
-        for merged_promise in data.merged.drain(..) {
-            merged_promise.fulfill(result.clone());
+        if let Some(merged) = data.merged.take() {
+            merged.fulfill(result.clone());
         }
         data.result.replace(result);
     }
 
     pub fn merge(&mut self, other: Self) {
-        self.shared.inner.lock().unwrap().merged.push(other);
+        let mut data = self.shared.inner.lock().unwrap();
+        if let Some(merged) = &mut data.merged {
+            merged.merge(other);
+        } else {
+            data.merged.replace(other);
+        }
     }
 }
 
@@ -180,5 +186,41 @@ mod test {
         thread::spawn(move || job.execute());
         assert_eq!(Ok("helloworld".to_string()), block_on(fut1));
         assert_eq!(Ok("helloworld".to_string()), block_on(fut2));
+    }
+
+    #[test]
+    fn test_merged_with_result_reverse() {
+        let (promise1, fut1) = Promise::new();
+        let (promise2, fut2) = Promise::new();
+        let mut job = MyJob(promise1, "hello".to_string());
+        let job2 = MyJob(promise2, "world".to_string());
+        (MyJob::ATTEMPT_MERGE_INTO.unwrap())(job2, &mut job);
+        thread::spawn(move || job.execute());
+        assert_eq!(Ok("helloworld".to_string()), block_on(fut2));
+        assert_eq!(Ok("helloworld".to_string()), block_on(fut1));
+    }
+
+    #[test]
+    fn test_merged_with_drop() {
+        let (promise1, fut1) = Promise::new();
+        let (promise2, fut2) = Promise::new();
+        let mut job = MyJob(promise1, "hello".to_string());
+        let job2 = MyJob(promise2, "world".to_string());
+        (MyJob::ATTEMPT_MERGE_INTO.unwrap())(job2, &mut job);
+        thread::spawn(move || drop(job));
+        assert!(block_on(fut1).is_err());
+        assert!(block_on(fut2).is_err());
+    }
+
+    #[test]
+    fn test_merged_with_drop_reverse() {
+        let (promise1, fut1) = Promise::new();
+        let (promise2, fut2) = Promise::new();
+        let mut job = MyJob(promise1, "hello".to_string());
+        let job2 = MyJob(promise2, "world".to_string());
+        (MyJob::ATTEMPT_MERGE_INTO.unwrap())(job2, &mut job);
+        thread::spawn(move || drop(job));
+        assert!(block_on(fut2).is_err());
+        assert!(block_on(fut1).is_err());
     }
 }

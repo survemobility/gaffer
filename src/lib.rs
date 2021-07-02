@@ -1,19 +1,17 @@
 use std::{
     fmt,
     sync::{mpsc, Arc, Mutex},
-    thread::JoinHandle,
 };
 
 use runner::ConcurrencyLimitFn;
 use source::SourceManager;
-pub use source::{PollSource, PollableSource};
+pub use source::{PollError, PollSource, PollableSource};
 
 pub mod future;
 mod runner;
 pub mod source;
 
 pub struct JobRunner<J: Job + 'static> {
-    threads: Vec<JoinHandle<()>>,
     sender: mpsc::Sender<J>,
 }
 
@@ -54,8 +52,8 @@ impl<J: Job + 'static> Builder<J> {
     pub fn build(self, thread_num: usize) -> JobRunner<J> {
         let (sender, sources) = SourceManager::new(self.poll_sources);
         let jobs = Arc::new(Mutex::new(sources));
-        let threads = runner::spawn(thread_num, jobs, self.concurrency_limit);
-        JobRunner { threads, sender }
+        let _threads = runner::spawn(thread_num, jobs, self.concurrency_limit);
+        JobRunner { sender }
     }
 }
 
