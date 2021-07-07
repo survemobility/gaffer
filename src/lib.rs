@@ -86,25 +86,26 @@
 use std::{
     fmt,
     sync::{mpsc, Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 use runner::ConcurrencyLimitFn;
-use source::SourceManager;
-pub use source::{PollError, PollSource, PollableSource};
+use source::{IntervalRecurringJob, RecurringJob, SourceManager};
 
 pub mod future;
 mod runner;
 pub mod source;
 
-pub struct JobRunner<J: Job + 'static> {
+pub struct JobRunner<J: Prioritised + 'static, R = IntervalRecurringJob<J>> {
     sender: mpsc::Sender<J>,
+    jobs: Arc<Mutex<SourceManager<J, R>>>,
 }
 
-impl<J: Job + 'static> JobRunner<J> {
-    pub fn builder() -> Builder<J> {
+impl<J: Job + 'static, R: RecurringJob<J>> JobRunner<J, R> {
+    pub fn builder() -> Builder<J, R> {
         Builder {
-            poll_sources: vec![],
             concurrency_limit: Box::new(|_: <J as Prioritised>::Priority| None as Option<u8>),
+            recurring: vec![],
         }
     }
 
@@ -113,18 +114,32 @@ impl<J: Job + 'static> JobRunner<J> {
     }
 }
 
-pub struct Builder<J: Job + 'static> {
-    poll_sources: Vec<PollSource<J>>,
-    concurrency_limit: Box<ConcurrencyLimitFn<J>>,
+impl<J: Prioritised + 'static, R> Clone for JobRunner<J, R> {
+    fn clone(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+            jobs: self.jobs.clone(),
+        }
+    }
 }
 
-impl<J: Job + 'static> Builder<J> {
-    /// Poller that will be polled according to it's own schedule to find candidate jobs. Any
-    pub fn add_poll(mut self, pollable: PollSource<J>) -> Self {
-        self.poll_sources.push(pollable);
-        self
-    }
+pub struct Builder<J: Job + 'static, R> {
+    concurrency_limit: Box<ConcurrencyLimitFn<J>>,
+    recurring: Vec<R>,
+}
 
+impl<J: Job + Send + Clone + 'static> Builder<J, IntervalRecurringJob<J>> {
+    /// Set a job as recurring, the job will be executed every time `interval` passes since the last execution of a matching job
+    pub fn set_recurring(&mut self, interval: Duration, last_enqueue: Instant, job: J) {
+        self.recurring.push(IntervalRecurringJob {
+            interval,
+            last_enqueue,
+            job,
+        });
+    }
+}
+
+impl<J: Job + 'static, R: RecurringJob<J> + Send + 'static> Builder<J, R> {
     /// Function determining, for each priority, how many threads can be allocated to jobs of this priority, any remaining threads will be left idle to service higher-priority jobs. `None` means parallelism won't be limited
     pub fn limit_concurrency(
         mut self,
@@ -134,11 +149,11 @@ impl<J: Job + 'static> Builder<J> {
         self
     }
 
-    pub fn build(self, thread_num: usize) -> JobRunner<J> {
-        let (sender, sources) = SourceManager::new(self.poll_sources);
+    pub fn build(self, thread_num: usize) -> JobRunner<J, R> {
+        let (sender, sources) = SourceManager::<J, R>::new_with_recurring(self.recurring);
         let jobs = Arc::new(Mutex::new(sources));
-        let _threads = runner::spawn(thread_num, jobs, self.concurrency_limit);
-        JobRunner { sender }
+        let _threads = runner::spawn(thread_num, jobs.clone(), self.concurrency_limit);
+        JobRunner { sender, jobs }
     }
 }
 
@@ -156,6 +171,10 @@ pub trait Prioritised: Sized {
     type Priority: Ord + Copy + Send;
 
     fn priority(&self) -> Self::Priority;
+
+    fn matches(&self, _job: &Self) -> bool {
+        false
+    }
 
     /// optional function to allow merging of jobs
     const ATTEMPT_MERGE_INTO: Option<fn(Self, &mut Self) -> MergeResult<Self>> = None;

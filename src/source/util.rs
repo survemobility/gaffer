@@ -1,9 +1,12 @@
 use std::{
     cmp::Reverse,
     collections::{BTreeMap, VecDeque},
+    fmt,
 };
 
 use crate::{MergeResult, Prioritised};
+
+use self::may_be_taken::SkipIterator;
 
 pub(crate) struct PriorityQueue<T: Prioritised> {
     map: BTreeMap<Reverse<T::Priority>, VecDeque<T>>,
@@ -21,7 +24,7 @@ impl<T: Prioritised> PriorityQueue<T> {
     pub fn enqueue(&mut self, mut item: T) {
         if let Some(attempt_merge) = T::ATTEMPT_MERGE_INTO {
             for (Reverse(priority), bucket) in &mut self.map {
-                // for now we iterate ove the whole queue to look for merges, not the best solution
+                // for now we iterate over the whole queue to look for merges, not the best solution
                 for (idx, existing) in bucket.iter_mut().enumerate() {
                     match (attempt_merge)(item, existing) {
                         MergeResult::NotMerged(the_item) => item = the_item,
@@ -39,58 +42,119 @@ impl<T: Prioritised> PriorityQueue<T> {
         self.enqueue_internal(item);
     }
 
-    pub fn enqueue_internal(&mut self, item: T) {
-        self.map
-            .entry(Reverse(item.priority()))
-            .or_default()
-            .push_back(item);
+    pub fn enqueue_internal(&mut self, item: T) -> &T {
+        let deque = self.map.entry(Reverse(item.priority())).or_default();
+        deque.push_back(item);
+        deque.back().unwrap()
     }
 
-    pub fn dequeue(&mut self) -> Option<T> {
+    pub fn dequeue(&mut self, mut idx: usize) -> Option<T> {
         for queue in self.map.values_mut() {
-            if let Some(next) = queue.pop_front() {
+            if let Some(next) = queue.remove(idx) {
                 return Some(next);
+            } else {
+                idx -= queue.len();
             }
             // we could have an `else` clause here to remove the empty sub-queue, but it's expected that a few priority levels will be used and so it's better to leave the m and avoid the allocations
+        }
+        None
+    }
+
+    pub fn get(&self, mut idx: usize) -> Option<&T> {
+        for queue in self.map.values() {
+            if let Some(item) = queue.get(idx) {
+                return Some(item);
+            } else {
+                idx -= queue.len();
+            }
         }
         None
     }
 
     /// drains each element iterated, once the iterator is dropped, *unlike `drain` implementations in the standard library, any remaining items are left in the queue
     pub fn drain(&mut self) -> Drain<'_, T> {
-        Drain { queue: self }
+        Drain {
+            queue: self,
+            skip: 0,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
         self.map.iter().all(|(_, queue)| queue.is_empty())
     }
+}
 
-    pub fn first(&self) -> Option<&T> {
-        for queue in self.map.values() {
-            if let Some(next) = queue.front() {
-                return Some(next);
-            }
-            // we could have an `else` clause here to remove the empty sub-queue, but it's expected that a few priority levels will be used and so it's better to leave the m and avoid the allocations
-        }
-        None
+impl<T: Prioritised> fmt::Debug for PriorityQueue<T>
+where
+    <T as Prioritised>::Priority: fmt::Debug,
+    T: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_map()
+            .entries(
+                self.map
+                    .iter()
+                    .filter_map(|(p, v)| if v.is_empty() { None } else { Some((p, v)) }),
+            )
+            .finish()
     }
 }
 
-pub(crate) struct Drain<'q, T: Prioritised> {
+pub struct Drain<'q, T: Prioritised> {
     queue: &'q mut PriorityQueue<T>,
-}
-
-impl<'q, T: Prioritised> Drain<'q, T> {
-    pub fn peek(&self) -> Option<&T> {
-        self.queue.first()
-    }
+    skip: usize,
 }
 
 impl<'q, T: Prioritised> Iterator for Drain<'q, T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.queue.dequeue()
+        self.queue.dequeue(self.skip)
+    }
+}
+
+impl<'q, T: Prioritised> SkipIterator for Drain<'q, T> {
+    fn peek_next(&mut self) -> Option<&Self::Item> {
+        self.queue.get(self.skip)
+    }
+
+    fn skip_next(&mut self) {
+        self.skip += 1;
+    }
+}
+
+pub(crate) mod may_be_taken {
+    use std::iter::Peekable;
+
+    pub(crate) trait SkipIterator: Iterator {
+        fn peek_next(&mut self) -> Option<&<Self as Iterator>::Item>;
+        fn skip_next(&mut self);
+    }
+
+    impl<I> SkipIterator for Peekable<I>
+    where
+        I: Iterator,
+    {
+        fn peek_next(&mut self) -> Option<&Self::Item> {
+            self.peek()
+        }
+
+        fn skip_next(&mut self) {
+            Iterator::next(self);
+        }
+    }
+
+    impl<I> SkipIterator for &mut Peekable<I>
+    where
+        I: Iterator,
+    {
+        fn peek_next(&mut self) -> Option<&Self::Item> {
+            Peekable::peek(self)
+        }
+
+        fn skip_next(&mut self) {
+            Iterator::next(self);
+        }
     }
 }
 
@@ -132,12 +196,33 @@ mod test {
         queue.enqueue(PrioritisedJob(1, 'a'));
         queue.enqueue(PrioritisedJob(1, 'b'));
         let mut drain = queue.drain();
-        assert_eq!(drain.peek(), Some(&PrioritisedJob(1, 'a')));
+        assert_eq!(drain.peek_next(), Some(&PrioritisedJob(1, 'a')));
         let vals: String = (&mut drain).take(1).map(|j| j.1).collect();
         assert_eq!(vals, "a");
-        assert_eq!(drain.peek(), Some(&PrioritisedJob(1, 'b')));
+        assert_eq!(drain.peek_next(), Some(&PrioritisedJob(1, 'b')));
         let vals: String = drain.map(|j| j.1).collect();
         assert_eq!(vals, "b");
+    }
+
+    #[test]
+    fn drain_skip() {
+        let mut queue = PriorityQueue::new();
+        queue.enqueue(PrioritisedJob(1, 'a'));
+        queue.enqueue(PrioritisedJob(1, 'b'));
+        queue.enqueue(PrioritisedJob(1, 'c'));
+        let mut drain = queue.drain();
+        assert_eq!(drain.peek_next(), Some(&PrioritisedJob(1, 'a')));
+        drain.skip_next();
+        assert_eq!(drain.peek_next(), Some(&PrioritisedJob(1, 'b')));
+        assert_eq!(drain.next(), Some(PrioritisedJob(1, 'b')));
+        assert_eq!(drain.peek_next(), Some(&PrioritisedJob(1, 'c')));
+        drain.skip_next();
+        assert_eq!(drain.peek_next(), None);
+
+        let vals: String = queue.drain().map(|j| j.1).collect();
+        assert_eq!(vals, "ac");
+
+        assert_eq!(queue.drain().map(|j| j.1).count(), 0);
     }
 
     #[derive(PartialEq, Eq, Debug)]
@@ -180,7 +265,9 @@ mod test {
 
 pub(crate) mod prioritized_mpsc {
     use std::{
+        fmt,
         sync::mpsc::{self, RecvTimeoutError},
+        thread,
         time::Duration,
     };
 
@@ -193,25 +280,90 @@ pub(crate) mod prioritized_mpsc {
         recv: mpsc::Receiver<T>,
     }
 
-    impl<T: Prioritised> Receiver<T> {
-        /// Waits up to `timeout` for the first message, if none are currently available, if some are available it returns immediately with an iterator over the currently available messages in priority order, any items not iterated when the iterator is dropped are left
-        pub(crate) fn iter_timeout(
-            &mut self,
-            timeout: Duration,
-        ) -> Result<super::Drain<T>, RecvTimeoutError> {
-            for item in self.recv.try_iter() {
-                self.queue.enqueue(item);
-            }
-            if !self.queue.is_empty() {
-                Ok(self.queue.drain())
-            } else {
-                self.recv.recv_timeout(timeout).map(move |message| {
-                    self.queue.enqueue(message);
-                    self.queue.drain()
-                })
-            }
+    impl<T: Prioritised> fmt::Debug for Receiver<T>
+    where
+        <T as Prioritised>::Priority: fmt::Debug,
+        T: fmt::Debug,
+    {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            self.queue.fmt(f)
         }
     }
+
+    impl<T: Prioritised> Receiver<T> {
+        /// Waits up to `timeout` for the first message, if none are currently available, if some are available it returns immediately with an iterator over the currently available messages in priority order, any items not iterated when the iterator is dropped are left
+        pub fn iter_timeout(&mut self, timeout: Duration) -> super::Drain<T> {
+            self.process_queue_timeout(timeout, false, |_| {});
+            self.drain()
+        }
+
+        pub fn process_queue_ready(&mut self, mut cb: impl FnMut(&T)) -> bool {
+            let mut has_new = false;
+            for item in self.recv.try_iter() {
+                cb(&item);
+                self.queue.enqueue(item);
+                has_new = true;
+            }
+            has_new
+        }
+
+        pub fn process_queue_timeout(
+            &mut self,
+            timeout: Duration,
+            wait_for_new: bool,
+            mut cb: impl FnMut(&T),
+        ) {
+            let has_new = self.process_queue_ready(&mut cb);
+            if !has_new && (wait_for_new || self.queue.is_empty()) {
+                match self.recv.recv_timeout(timeout) {
+                    Ok(item) => {
+                        cb(&item);
+                        self.queue.enqueue(item);
+                    }
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => {
+                        thread::sleep(timeout);
+                    }
+                }
+            }
+        }
+
+        pub fn drain(&mut self) -> super::Drain<T> {
+            self.queue.drain()
+        }
+
+        pub fn enqueue(&mut self, item: T) {
+            self.queue.enqueue(item);
+        }
+    }
+
+    // struct ProcessQueueIter<'q, T: Prioritised + 'q> {
+    //     inner: &'q mut Receiver<T>,
+    //     wait_for_new: bool,
+    //     timeout: Duration,
+    // }
+
+    // impl<'q, T: Prioritised + 'q> Iterator for ProcessQueueIter<'q, T> {
+    //     type Item = &'q T;
+
+    //     fn next(&mut self) -> Option<Self::Item> {
+    //         if let Ok(item) = self.inner.recv.try_recv() {
+    //             self.wait_for_new = false;
+    //             self.inner.queue.enqueue(item)
+    //         } else if self.wait_for_new {
+    //             match self.inner.recv.recv_timeout(self.timeout) {
+    //                 Ok(message) => Some(self.inner.queue.enqueue(message)),
+    //                 Err(RecvTimeoutError::Timeout) => None,
+    //                 Err(RecvTimeoutError::Disconnected) => {
+    //                     thread::sleep(self.timeout);
+    //                     None
+    //                 },
+    //             }
+    //         } else {
+    //             None
+    //         }
+    //     }
+    // }
 
     /// Produces an mpsc channel where, in the event that multiple jobs are already ready, they are produced in priority order
     pub fn channel<T: Prioritised>() -> (mpsc::Sender<T>, Receiver<T>) {
@@ -248,10 +400,7 @@ pub(crate) mod prioritized_mpsc {
         #[test]
         fn iter_timeout_expires() {
             let (_send, mut recv) = channel::<Tester>();
-            assert_eq!(
-                recv.iter_timeout(Duration::from_micros(1)).err().unwrap(),
-                RecvTimeoutError::Timeout
-            );
+            assert_eq!(recv.iter_timeout(Duration::from_micros(1)).count(), 0);
         }
 
         #[test]
@@ -262,10 +411,7 @@ pub(crate) mod prioritized_mpsc {
             });
             let instant = Instant::now();
             assert_eq!(
-                recv.iter_timeout(Duration::from_millis(1))
-                    .unwrap()
-                    .next()
-                    .unwrap(),
+                recv.iter_timeout(Duration::from_millis(1)).next().unwrap(),
                 Tester(0)
             );
             assert!(Instant::now().duration_since(instant) < Duration::from_millis(1));
@@ -277,10 +423,7 @@ pub(crate) mod prioritized_mpsc {
             send.send(Tester(2)).unwrap();
             send.send(Tester(3)).unwrap();
             send.send(Tester(1)).unwrap();
-            let items: Vec<_> = recv
-                .iter_timeout(Duration::from_millis(1))
-                .unwrap()
-                .collect();
+            let items: Vec<_> = recv.iter_timeout(Duration::from_millis(1)).collect();
             assert_eq!(items, vec![Tester(3), Tester(2), Tester(1)]);
         }
     }

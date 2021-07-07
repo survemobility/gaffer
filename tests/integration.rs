@@ -8,9 +8,26 @@ use std::{
 
 use foreman::*;
 
+macro_rules! assert_recv {
+    ($helper:expr, $expect:literal) => {
+        let mut actual = String::default();
+        while $expect.len() > actual.len() {
+            let c = $helper
+                .recv
+                .recv_timeout(Duration::from_millis(100))
+                .expect(&format!(
+                    "Timed out with only {:?}, expected {:?}",
+                    actual, $expect
+                ));
+            actual.push(c);
+        }
+        assert_eq!($expect, actual);
+    };
+}
+
 #[test]
 fn integration_1_thread_blocked() {
-    let helper = TestHelper::new(1, Duration::from_millis(10), Duration::from_millis(20));
+    let helper = TestHelper::new(1, Duration::from_millis(10), "x");
 
     helper.wait_micros(400, 1, 'a');
     helper.pause(300); // a gets picked up alone, the rest are waiting once a is ready
@@ -18,39 +35,36 @@ fn integration_1_thread_blocked() {
     helper.wait_micros(10, 1, 'd');
     helper.wait_micros(10, 1, 'e');
     helper.wait_micros(10, 3, 'b');
-    helper.assert_recv("abcde");
+    assert_recv!(helper, "abcde");
 }
 
 #[test]
-fn integration_1_thread_lower_than_poll() {
-    let helper = TestHelper::new(1, Duration::from_millis(1), Duration::from_millis(2));
+fn integration_1_thread_recurrance() {
+    let helper = TestHelper::new(1, Duration::from_millis(1), "xyz");
 
-    helper.pause(1000); // poll is ready
-    helper.wait_micros(10, 1, 'f'); // lower priority, comes after the x
-    helper.assert_recv("xf");
+    assert_recv!(helper, "xyz");
+    assert_recv!(helper, "xyz");
+    helper.wait_micros(10, 3, 'a');
+    helper.wait_micros(10, 3, 'b');
+    assert_recv!(helper, "ab");
+    assert_recv!(helper, "xyz");
 }
 
 #[test]
-fn integration_1_thread_higher_than_poll() {
-    let helper = TestHelper::new(1, Duration::from_millis(1), Duration::from_millis(2));
+fn integration_2_thread_limited() {
+    let helper =
+        TestHelper::new_runner(JobRunner::builder().limit_concurrency(|_| Some(1)).build(2));
 
-    helper.pause(1000); // poll is ready
-    helper.wait_micros(10, 3, 'g'); // higher priority, comes before the x
-    helper.assert_recv("gx");
-}
-
-#[test]
-fn integration_1_poll_preferred() {
-    let helper = TestHelper::new(1, Duration::from_millis(1), Duration::from_millis(2));
-
-    helper.pause(3000); // poll is preferred, comes before the higher priority h
-    helper.wait_micros(10, 3, 'h');
-    helper.assert_recv("xh");
+    helper.wait_micros(10, 3, 'a');
+    helper.wait_micros(10, 3, 'b');
+    helper.wait_micros(10, 3, 'c');
+    helper.wait_micros(10, 3, 'd');
+    assert_recv!(helper, "abcd");
 }
 
 #[test]
 fn integration_2_threads_block() {
-    let helper = TestHelper::new(2, Duration::from_millis(10), Duration::from_millis(20));
+    let helper = TestHelper::new(2, Duration::from_millis(10), "x");
 
     helper.wait_micros(300, 1, 'a');
     helper.wait_micros(1000, 1, 'e');
@@ -58,36 +72,36 @@ fn integration_2_threads_block() {
     helper.wait_micros(10, 1, 'c');
     helper.wait_micros(10, 1, 'd');
     helper.wait_micros(10, 3, 'b');
-    helper.assert_recv("abcde");
+    assert_recv!(helper, "abcde");
 }
 
 #[test]
-fn integration_2_threads_lower_than_poll() {
-    let helper = TestHelper::new(2, Duration::from_millis(1), Duration::from_millis(2));
+fn integration_2_threads_lower_than_recurring() {
+    let helper = TestHelper::new(2, Duration::from_millis(1), "xy");
 
-    helper.pause(1000); // poll is ready
+    helper.pause(1000); // recurring is ready
     helper.wait_micros(10, 1, 'f'); // lower priority, comes after the x & y
-    helper.assert_recv_unordered("xy"); // unfortunately the ordering of x & y is non-deterministic as it depends on how quickly the worker thread wakes up
-    helper.assert_recv("f");
+    helper.assert_recv_unordered("xy"); // unfortunately the ordering of y & z is non-deterministic as it depends on how quickly the worker thread wakes up
+    assert_recv!(helper, "f");
 }
 
 #[test]
-fn integration_2_threads_higher_than_poll() {
-    let helper = TestHelper::new(2, Duration::from_millis(1), Duration::from_millis(2));
+fn integration_2_threads_higher_than_recurring() {
+    let helper = TestHelper::new(2, Duration::from_millis(1), "x");
 
     helper.pause(1000); // poll is ready
-    helper.wait_micros(10, 3, 'g'); // higher priority, comes before the x
-    helper.assert_recv_unordered("gx"); // unfortunately the ordering of g & x is non-deterministic as it depends on how quickly the worker thread wakes up
+    helper.wait_micros(10, 3, 'g'); // higher priority, comes before the z
+    helper.assert_recv_unordered("gx"); // unfortunately the ordering of g & z is non-deterministic as it depends on how quickly the worker thread wakes up
 }
 
 #[test]
 fn integration_2_threads_poll_preferred() {
-    let helper = TestHelper::new(2, Duration::from_millis(2), Duration::from_millis(2));
+    let helper = TestHelper::new(2, Duration::from_millis(2), "xy");
 
     helper.pause(3000); // poll is preferred, comes before the higher priority h
     helper.wait_micros(10, 3, 'h');
     helper.assert_recv_unordered("xy"); // unfortunately the ordering of x & y is non-deterministic as it depends on how quickly the worker thread wakes up
-    helper.assert_recv("h");
+    assert_recv!(helper, "h");
 }
 
 struct TestHelper {
@@ -97,59 +111,30 @@ struct TestHelper {
 }
 
 impl TestHelper {
-    fn new(thread_num: usize, min_interval: Duration, preferred_interval: Duration) -> Self {
+    fn new(thread_num: usize, interval: Duration, recurring: &str) -> Self {
         let (send, recv) = mpsc::channel();
 
-        let runner = JobRunner::builder()
-            .add_poll(PollSource {
-                pollable: PollableSource {
-                    poll: {
-                        let send = send.clone();
-                        Box::new(move || {
-                            let send = send.clone();
-                            Ok(Box::new(
-                                vec![
-                                    {
-                                        let send = send.clone();
-                                        WaitJob {
-                                            created: Instant::now(),
-                                            duration: Duration::from_micros(40),
-                                            priority: 2,
-                                            exclusion: None,
-                                            callback: Box::new(move || send.send('x').unwrap()),
-                                        }
-                                    },
-                                    {
-                                        let send = send.clone();
-                                        WaitJob {
-                                            created: Instant::now(),
-                                            duration: Duration::from_micros(40),
-                                            priority: 2,
-                                            exclusion: None,
-                                            callback: Box::new(move || send.send('y').unwrap()),
-                                        }
-                                    },
-                                    {
-                                        let send = send.clone();
-                                        WaitJob {
-                                            created: Instant::now(),
-                                            duration: Duration::from_micros(40),
-                                            priority: 2,
-                                            exclusion: None,
-                                            callback: Box::new(move || send.send('z').unwrap()),
-                                        }
-                                    },
-                                ]
-                                .into_iter(),
-                            ))
-                        })
-                    },
-                    min_interval,
-                    preferred_interval,
+        let mut runner = JobRunner::builder();
+        for key in recurring.chars() {
+            runner.set_recurring(
+                interval,
+                Instant::now(),
+                WaitJob {
+                    created: Instant::now(),
+                    duration: Duration::from_micros(40),
+                    priority: 2,
+                    exclusion: None,
+                    key,
+                    send: send.clone(),
                 },
-                last_poll: Instant::now(),
-            })
-            .build(thread_num);
+            );
+        }
+        let runner = runner.build(thread_num);
+        Self { runner, send, recv }
+    }
+
+    fn new_runner(runner: JobRunner<WaitJob>) -> Self {
+        let (send, recv) = mpsc::channel();
         Self { runner, send, recv }
     }
 
@@ -161,7 +146,8 @@ impl TestHelper {
                 duration: Duration::from_micros(micros),
                 priority,
                 exclusion: None,
-                callback: Box::new(move || send.send(key).unwrap()),
+                key,
+                send,
             })
             .unwrap()
     }
@@ -171,32 +157,45 @@ impl TestHelper {
     }
 
     fn assert_recv(&self, expect: &str) {
-        assert_eq!(
-            expect,
-            self.recv.iter().take(expect.len()).collect::<String>()
-        );
+        let mut actual = String::default();
+        while expect.len() > actual.len() {
+            let c = self
+                .recv
+                .recv_timeout(Duration::from_millis(100))
+                .expect(&format!(
+                    "Timed out with only {:?}, expected {:?}",
+                    actual, expect
+                ));
+            actual.push(c);
+        }
+        assert_eq!(expect, actual);
     }
 
     fn assert_recv_unordered(&self, expect: &str) {
-        let mut expect: HashSet<_> = expect.chars().collect();
-        while !expect.is_empty() {
-            let c = self.recv.recv_timeout(Duration::from_secs(1)).unwrap();
-            assert!(
-                expect.remove(&c),
-                "Received char {:?} not in expected set {:?}",
-                c,
-                expect
-            );
+        let expect: HashSet<_> = expect.chars().collect();
+        let mut actual = HashSet::default();
+        while expect.len() > actual.len() {
+            let c = self
+                .recv
+                .recv_timeout(Duration::from_millis(100))
+                .expect(&format!(
+                    "Timed out with only {:?}, expected {:?}",
+                    actual, expect
+                ));
+            actual.insert(c);
         }
+        assert_eq!(expect, actual);
     }
 }
 
+#[derive(Clone)]
 struct WaitJob {
     created: Instant,
     duration: Duration,
     priority: u8,
     exclusion: Option<char>,
-    callback: Box<dyn FnOnce() + Send>,
+    key: char,
+    send: mpsc::Sender<char>,
 }
 
 impl Job for WaitJob {
@@ -209,7 +208,7 @@ impl Job for WaitJob {
     fn execute(self) {
         thread::sleep(self.duration);
         println!("Completed job {:?}", self);
-        (self.callback)();
+        self.send.send(self.key).unwrap();
     }
 }
 
@@ -219,17 +218,22 @@ impl Prioritised for WaitJob {
     fn priority(&self) -> Self::Priority {
         self.priority.into()
     }
+
+    fn matches(&self, job: &Self) -> bool {
+        self.key == job.key
+    }
 }
 
 impl fmt::Debug for WaitJob {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "WaitJob({:?} took {:?}, {:?}, {:?}, ..)",
+            "WaitJob({:?} took {:?}, {:?}, {:?}, {:?}, ..)",
             self.duration,
             Instant::now() - self.created,
             self.priority,
-            self.exclusion
+            self.exclusion,
+            self.key,
         )
     }
 }

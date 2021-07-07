@@ -11,22 +11,21 @@ use std::{
     time::{Duration, Instant},
 };
 
-use foreman::{
-    source::{PollError, PollSource, PollableSource},
-    ExclusionOption, Job, JobRunner, MergeResult, Prioritised,
-};
+use foreman::{ExclusionOption, Job, JobRunner, MergeResult, Prioritised};
 
 fn main() {
-    let runner = JobRunner::builder()
-        .add_poll(PollSource {
-            pollable: PollableSource {
-                poll: Box::new(poll_file),
-                min_interval: Duration::from_secs(20),
-                preferred_interval: Duration::from_secs(30),
-            },
-            last_poll: Instant::now() - Duration::from_secs(120),
-        })
-        .build(2);
+    let mut runner = JobRunner::builder();
+    let file = fs::File::open("examples/poll").unwrap();
+    let r = BufReader::new(file);
+    for line in r.lines().take_while(Result::is_ok).map(Result::unwrap) {
+        let (interval, job) = line.split_once(' ').unwrap();
+        let interval = Duration::from_secs(interval.parse().unwrap());
+        let job: WaitJob = job.parse().unwrap();
+        println!("Recurring every {:?} : {:?}", interval, job);
+        runner.set_recurring(interval, Instant::now(), job);
+    }
+
+    let runner = runner.build(2);
 
     let stdin = std::io::stdin();
     let mut input = String::new();
@@ -36,24 +35,14 @@ fn main() {
         }
         if let Ok(job) = input.parse() {
             runner.send(job).unwrap()
+        } else {
+            println!("Couldnt parse {:?}", input);
         }
         input.clear();
     }
 }
 
-fn poll_file() -> Result<Box<dyn Iterator<Item = WaitJob>>, PollError> {
-    println!("polling");
-    let file = fs::File::open("examples/poll").or(Err(PollError::ResetInterval))?;
-    let r = BufReader::new(file);
-    let jobs = r
-        .lines()
-        .take_while(Result::is_ok)
-        .map(Result::unwrap)
-        .flat_map(|line| line.parse());
-    Ok(Box::new(jobs))
-}
-
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct WaitJob(Duration, u8, Option<char>);
 
 impl Job for WaitJob {
@@ -78,7 +67,7 @@ impl Prioritised for WaitJob {
 
     const ATTEMPT_MERGE_INTO: Option<fn(Self, &mut Self) -> MergeResult<Self>> =
         Some(|me: Self, other: &mut Self| -> MergeResult<Self> {
-            if me.1 == other.1 {
+            if me.2.is_some() && me.2 == other.2 {
                 other.0 += me.0;
                 other.1 = other.1.max(me.1);
                 MergeResult::Success
@@ -86,6 +75,10 @@ impl Prioritised for WaitJob {
                 MergeResult::NotMerged(me)
             }
         });
+
+    fn matches(&self, job: &Self) -> bool {
+        self.2.is_some() && self.2 == job.2
+    }
 }
 
 impl FromStr for WaitJob {
