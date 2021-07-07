@@ -1,7 +1,6 @@
 use std::{
     fmt,
     iter::Iterator,
-    sync::mpsc,
     time::{Duration, Instant},
 };
 
@@ -39,7 +38,7 @@ where
 }
 
 impl<J: Prioritised + Send + 'static, R: RecurringJob<J>> SourceManager<J, R> {
-    pub fn new() -> (mpsc::Sender<J>, SourceManager<J, R>) {
+    pub fn new() -> (crossbeam_channel::Sender<J>, SourceManager<J, R>) {
         let (send, recv) = prioritized_mpsc::channel();
         (
             send,
@@ -50,7 +49,9 @@ impl<J: Prioritised + Send + 'static, R: RecurringJob<J>> SourceManager<J, R> {
         )
     }
 
-    pub fn new_with_recurring(recurring: Vec<R>) -> (mpsc::Sender<J>, SourceManager<J, R>) {
+    pub fn new_with_recurring(
+        recurring: Vec<R>,
+    ) -> (crossbeam_channel::Sender<J>, SourceManager<J, R>) {
         let (send, recv) = prioritized_mpsc::channel();
         (
             send,

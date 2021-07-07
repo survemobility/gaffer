@@ -1,7 +1,7 @@
 use std::{
     fmt::Debug,
     iter,
-    sync::{mpsc, Arc, Barrier, Mutex},
+    sync::{Arc, Barrier, Mutex},
     thread::{self, JoinHandle},
 };
 
@@ -20,7 +20,7 @@ impl<J: Job> RunnerState<J> {
     pub fn new(
         num: usize,
         concurrency_limit: impl Into<Arc<ConcurrencyLimitFn<J>>>,
-    ) -> impl Iterator<Item = (mpsc::Receiver<J>, Self)> {
+    ) -> impl Iterator<Item = (crossbeam_channel::Receiver<J>, Self)> {
         let (receivers, worker_state): (Vec<_>, _) =
             iter::repeat_with(WorkerState::available).take(num).unzip();
         let worker_state = Arc::new(Mutex::new(worker_state));
@@ -45,7 +45,7 @@ impl<J: Job> RunnerState<J> {
         let mut workers = self.workers.lock().unwrap();
         assert!(workers[self.worker_index].is_working());
         if workers.iter().any(|worker| worker.is_supervisor()) {
-            let (send, recv) = mpsc::channel();
+            let (send, recv) = crossbeam_channel::bounded(1);
             workers[self.worker_index] = WorkerState::Available(send);
             PostJobTransition::BecomeAvailable(recv)
         } else {
@@ -109,19 +109,19 @@ impl<J: Job> RunnerState<J> {
 
 enum PostJobTransition<J> {
     BecomeSupervisor,
-    BecomeAvailable(mpsc::Receiver<J>),
+    BecomeAvailable(crossbeam_channel::Receiver<J>),
 }
 
 #[derive(Debug)]
 enum WorkerState<J: Job> {
     Supervisor,
     Working(J::Exclusion),
-    Available(mpsc::Sender<J>),
+    Available(crossbeam_channel::Sender<J>),
 }
 
 impl<J: Job> WorkerState<J> {
-    fn available() -> (mpsc::Receiver<J>, Self) {
-        let (send, recv) = mpsc::channel();
+    fn available() -> (crossbeam_channel::Receiver<J>, Self) {
+        let (send, recv) = crossbeam_channel::bounded(1);
         (recv, Self::Available(send))
     }
 
@@ -257,7 +257,7 @@ mod test {
     /// when a job is assigned the state is switched to working and the job is sent over the channel
     #[test]
     fn available_to_working() {
-        let (send, recv) = mpsc::channel();
+        let (send, recv) = crossbeam_channel::unbounded();
         let state = RunnerState::<ExcludedJob> {
             workers: Arc::new(Mutex::new(vec![
                 WorkerState::Supervisor,
@@ -296,7 +296,7 @@ mod test {
     /// if a job's exclusion is equal to a running job, it should not be assigned
     #[test]
     fn equal_exclusion_running() {
-        let (send, recv) = mpsc::channel();
+        let (send, recv) = crossbeam_channel::unbounded();
         let state = RunnerState::<ExcludedJob> {
             workers: Arc::new(Mutex::new(vec![
                 WorkerState::Supervisor,
@@ -321,7 +321,7 @@ mod test {
     /// if 2 jobs are added with the same exclusion, only the first should be added
     #[test]
     fn equal_exclusion_adding() {
-        let (send, recv) = mpsc::channel();
+        let (send, recv) = crossbeam_channel::unbounded();
         let state = RunnerState::<ExcludedJob> {
             workers: Arc::new(Mutex::new(vec![
                 WorkerState::Supervisor,
@@ -389,7 +389,7 @@ mod test {
     /// only one job with parrallelisation 2 will be run if 1 worker is already working
     #[test]
     fn parallelisation_2x2_running_1() {
-        let (send, recv) = mpsc::channel();
+        let (send, recv) = crossbeam_channel::unbounded();
         let state = RunnerState::<PrioritisedJob> {
             workers: Arc::new(Mutex::new(vec![
                 WorkerState::Supervisor,
@@ -434,7 +434,7 @@ fn run<J: Job + 'static, R: RecurringJob<J>>(
     state: RunnerState<J>,
     jobs: Arc<Mutex<super::source::SourceManager<J, R>>>,
     ready_barrier: Arc<Barrier>,
-    recv: mpsc::Receiver<J>,
+    recv: crossbeam_channel::Receiver<J>,
 ) {
     let mut job = if ready_barrier.wait().is_leader() {
         // become the supervisor
@@ -460,14 +460,11 @@ fn run_supervisor<J: Job + 'static, R: RecurringJob<J>>(
 ) -> J {
     let mut jobs = jobs.lock().unwrap();
     let mut wait_for_new = false;
-    // println!("Became supervisor, jobs : {:?}", &jobs);
     loop {
         if let Some(job) = state.assign_jobs(jobs.get(wait_for_new)) {
-            // println!("Became worker with job : {:?}", &job);
             // become a worker
             return job;
         }
-        // println!("Remain supervisor, jobs : {:?}", &jobs);
         wait_for_new = true;
     }
 }

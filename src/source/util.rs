@@ -94,7 +94,7 @@ where
             .entries(
                 self.map
                     .iter()
-                    .filter_map(|(p, v)| if v.is_empty() { None } else { Some((p, v)) }),
+                    .filter_map(|(Reverse(p), v)| if v.is_empty() { None } else { Some((p, v)) }),
             )
             .finish()
     }
@@ -264,12 +264,7 @@ mod test {
 }
 
 pub(crate) mod prioritized_mpsc {
-    use std::{
-        fmt,
-        sync::mpsc::{self, RecvTimeoutError},
-        thread,
-        time::Duration,
-    };
+    use std::{fmt, thread, time::Duration};
 
     use crate::Prioritised;
 
@@ -277,7 +272,7 @@ pub(crate) mod prioritized_mpsc {
 
     pub struct Receiver<T: Prioritised> {
         queue: PriorityQueue<T>,
-        recv: mpsc::Receiver<T>,
+        recv: crossbeam_channel::Receiver<T>,
     }
 
     impl<T: Prioritised> fmt::Debug for Receiver<T>
@@ -320,8 +315,8 @@ pub(crate) mod prioritized_mpsc {
                         cb(&item);
                         self.queue.enqueue(item);
                     }
-                    Err(RecvTimeoutError::Timeout) => {}
-                    Err(RecvTimeoutError::Disconnected) => {
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
                         thread::sleep(timeout);
                     }
                 }
@@ -366,8 +361,8 @@ pub(crate) mod prioritized_mpsc {
     // }
 
     /// Produces an mpsc channel where, in the event that multiple jobs are already ready, they are produced in priority order
-    pub fn channel<T: Prioritised>() -> (mpsc::Sender<T>, Receiver<T>) {
-        let (send, recv) = mpsc::channel();
+    pub fn channel<T: Prioritised>() -> (crossbeam_channel::Sender<T>, Receiver<T>) {
+        let (send, recv) = crossbeam_channel::unbounded();
         (
             send,
             Receiver {

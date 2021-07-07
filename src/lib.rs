@@ -85,7 +85,7 @@
 ///! ```
 use std::{
     fmt,
-    sync::{mpsc, Arc, Mutex},
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -97,7 +97,7 @@ mod runner;
 pub mod source;
 
 pub struct JobRunner<J: Prioritised + 'static, R = IntervalRecurringJob<J>> {
-    sender: mpsc::Sender<J>,
+    sender: crossbeam_channel::Sender<J>,
     jobs: Arc<Mutex<SourceManager<J, R>>>,
 }
 
@@ -109,7 +109,7 @@ impl<J: Job + 'static, R: RecurringJob<J>> JobRunner<J, R> {
         }
     }
 
-    pub fn send(&self, job: J) -> Result<(), mpsc::SendError<J>> {
+    pub fn send(&self, job: J) -> Result<(), crossbeam_channel::SendError<J>> {
         self.sender.send(job)
     }
 }
