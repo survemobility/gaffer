@@ -197,9 +197,10 @@ impl PartialEq for NoExclusion {
     }
 }
 
-/// Allows some jobs to be run at the same time, and others to be exclusive
+/// Allows some jobs to be run at the same time, others to acquire a keyed exclusive lock, and others to acquire a global exclusive lock
 #[derive(Debug, Copy, Clone)]
 pub enum ExclusionOption<T> {
+    All,
     Some(T),
     None,
 }
@@ -221,5 +222,11 @@ impl<T> From<Option<T>> for ExclusionOption<T> {
         } else {
             ExclusionOption::None
         }
+    }
+}
+
+impl<T> From<T> for ExclusionOption<T> {
+    fn from(val: T) -> Self {
+        ExclusionOption::Some(val)
     }
 }
