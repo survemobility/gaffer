@@ -1,7 +1,7 @@
 ///! # chief
 ///!
 ///! Prioritised, parallel job scheduler with concurrent exclusion, job merging, recurring jobs and load limiting for lower priorities.
-///! 
+///!
 ///! A job scheduler executes tasks on it's own thread or thread pool. This job scheduler is particularly designed to consider heavier weight or more expensive jobs, which likely have side effects. In this case it can be valuable to prioritise the jobs and merge alike jobs in the queue.
 ///!
 ///! __Features__
@@ -74,6 +74,7 @@
 ///! ```
 use std::{
     fmt,
+    panic::UnwindSafe,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -128,7 +129,7 @@ impl<J: Job + Send + Clone + 'static> Builder<J, IntervalRecurringJob<J>> {
     }
 }
 
-impl<J: Job + 'static, R: RecurringJob<J> + Send + 'static> Builder<J, R> {
+impl<J: Job + UnwindSafe + 'static, R: RecurringJob<J> + Send + 'static> Builder<J, R> {
     /// Function determining, for each priority, how many threads can be allocated to jobs of this priority, any remaining threads will be left idle to service higher-priority jobs. `None` means parallelism won't be limited
     pub fn limit_concurrency(
         mut self,

@@ -6,7 +6,7 @@ use std::{
 
 use crate::Prioritised;
 
-use self::util::{may_be_taken::SkipIterator, prioritized_mpsc, Drain};
+use self::util::{prioritized_mpsc, Drain};
 
 pub(crate) mod util;
 
@@ -146,47 +146,15 @@ pub enum NeverRecur {}
 
 impl<J> RecurringJob<J> for NeverRecur {
     fn get(&self) -> Option<J> {
-        panic!()
+        unreachable!()
     }
 
     fn job_enqueued(&mut self, _job: &J) {
-        panic!()
+        unreachable!()
     }
 
     fn max_sleep(&self) -> Instant {
-        panic!()
-    }
-}
-
-pub struct Iter<'m, J: Prioritised> {
-    queue: Option<Drain<'m, J>>,
-}
-
-impl<'m, J: Prioritised> Iterator for Iter<'m, J> {
-    type Item = J;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if let Some(queue) = &mut self.queue {
-            queue.next()
-        } else {
-            None
-        }
-    }
-}
-
-impl<'m, J: Prioritised> SkipIterator for Iter<'m, J> {
-    fn peek_next(&mut self) -> Option<&Self::Item> {
-        if let Some(queue) = &mut self.queue {
-            queue.peek_next()
-        } else {
-            None
-        }
-    }
-
-    fn skip_next(&mut self) {
-        if let Some(queue) = &mut self.queue {
-            queue.skip_next();
-        }
+        unreachable!()
     }
 }
 
@@ -287,10 +255,10 @@ mod test {
     #[test]
     fn queued_resets_recurring() {
         let (send, mut manager) = SourceManager::new();
-        let half_interval_ago = Instant::now() - Duration::from_micros(500);
-        manager.set_recurring(Duration::from_millis(1), half_interval_ago, Tester(1));
-        manager.set_recurring(Duration::from_millis(1), half_interval_ago, Tester(2));
-        manager.set_recurring(Duration::from_millis(1), half_interval_ago, Tester(3));
+        let half_interval_ago = Instant::now() - Duration::from_micros(1000);
+        manager.set_recurring(Duration::from_millis(2), half_interval_ago, Tester(1));
+        manager.set_recurring(Duration::from_millis(2), half_interval_ago, Tester(2));
+        manager.set_recurring(Duration::from_millis(2), half_interval_ago, Tester(3));
         send.send(Tester(2)).unwrap();
         assert_eq!(manager.get(false).collect::<Vec<_>>(), vec![Tester(2)]);
         assert_eq!(

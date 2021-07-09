@@ -3,6 +3,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::MutexGuard;
+use std::sync::PoisonError;
 use std::task::{Poll, Waker};
 
 /// The sending side of a promise which can be used to complete a future. If 2 promises are of the same type, they can be merged and then all the futures will be resolved with clones of the result.
@@ -29,6 +31,12 @@ impl<T> Default for PromiseShared<T> {
     }
 }
 
+impl<T> PromiseShared<T> {
+    fn inner(&self) -> MutexGuard<PromiseInner<T>> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner) // none of the promise inner state would be left inconsistent in the event of a panic, so we can safely ignore if the mutex is poisoned
+    }
+}
+
 struct PromiseInner<T> {
     result: Option<T>,
     waker: Option<Waker>,
@@ -45,23 +53,23 @@ impl<T> Default for PromiseInner<T> {
     }
 }
 
-impl<T> Drop for Promise<T> {
-    fn drop(&mut self) {
-        self.shared.promise_dropped.store(true, Ordering::Release);
-        let mut data = self.shared.inner.lock().unwrap();
-        drop(data.merged.take());
-        if let Some(waker) = data.waker.take() {
-            waker.wake();
-        }
-    }
-}
-
 unsafe impl<T: Send> Send for PromiseInner<T> {}
 unsafe impl<T: Send> Sync for PromiseInner<T> {}
 
 /// The promise was dropped and so a result will never be provided
 #[derive(Debug, PartialEq, Eq)]
 pub struct PromiseDropped;
+
+impl<T> Drop for Promise<T> {
+    fn drop(&mut self) {
+        self.shared.promise_dropped.store(true, Ordering::Release);
+        let mut data = self.shared.inner();
+        drop(data.merged.take());
+        if let Some(waker) = data.waker.take() {
+            waker.wake();
+        }
+    }
+}
 
 impl<T: Clone> Promise<T> {
     /// Create the sending and receiving parts of the promise.
@@ -76,7 +84,7 @@ impl<T: Clone> Promise<T> {
     }
 
     pub fn fulfill(self, result: T) {
-        let mut data = self.shared.inner.lock().unwrap();
+        let mut data = self.shared.inner();
         if let Some(merged) = data.merged.take() {
             merged.fulfill(result.clone());
         }
@@ -84,7 +92,7 @@ impl<T: Clone> Promise<T> {
     }
 
     pub fn merge(&mut self, other: Self) {
-        let mut data = self.shared.inner.lock().unwrap();
+        let mut data = self.shared.inner();
         if let Some(merged) = &mut data.merged {
             merged.merge(other);
         } else {
@@ -97,7 +105,7 @@ impl<T> Future for PromiseFuture<T> {
     type Output = Result<T, PromiseDropped>;
 
     fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
-        let mut data = self.shared.inner.lock().unwrap();
+        let mut data = self.shared.inner();
         if let Some(result) = data.result.take() {
             Poll::Ready(Ok(result))
         } else if self.shared.promise_dropped.load(Ordering::Acquire) {

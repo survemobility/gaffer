@@ -5,6 +5,7 @@ use std::{
 };
 
 use chief::*;
+use crossbeam_channel::Sender;
 
 macro_rules! assert_recv {
     ($helper:expr, $expect:literal) => {
@@ -102,6 +103,40 @@ fn integration_2_threads_poll_preferred() {
     helper.wait_micros(10, 3, 'h');
     helper.assert_recv_unordered("xy"); // unfortunately the ordering of x & y is non-deterministic as it depends on how quickly the worker thread wakes up
     assert_recv!(helper, "h");
+}
+
+// a panicking job should not kill the thread
+#[test]
+fn panic_in_job() {
+    let (send, recv) = crossbeam_channel::unbounded();
+
+    struct PanicJob(Option<Sender<()>>);
+    impl Prioritised for PanicJob {
+        type Priority = ();
+
+        fn priority(&self) -> Self::Priority {}
+
+        const ATTEMPT_MERGE_INTO: Option<fn(Self, &mut Self) -> MergeResult<Self>> = None;
+    }
+    impl Job for PanicJob {
+        type Exclusion = NoExclusion;
+
+        fn exclusion(&self) -> Self::Exclusion {
+            NoExclusion
+        }
+
+        fn execute(self) {
+            if let Some(send) = self.0 {
+                send.send(()).unwrap();
+            } else {
+                panic!();
+            }
+        }
+    }
+    let runner: JobRunner<_, source::NeverRecur> = JobRunner::builder().build(1);
+    runner.send(PanicJob(None)).unwrap();
+    runner.send(PanicJob(Some(send))).unwrap();
+    assert!(recv.recv_timeout(Duration::from_millis(500)).is_ok());
 }
 
 struct TestHelper {

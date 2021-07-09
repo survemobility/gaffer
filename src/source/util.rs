@@ -82,6 +82,10 @@ impl<T: Prioritised> PriorityQueue<T> {
     pub fn is_empty(&self) -> bool {
         self.map.iter().all(|(_, queue)| queue.is_empty())
     }
+
+    pub fn len(&self) -> usize {
+        self.map.iter().map(|(_, queue)| queue.len()).sum()
+    }
 }
 
 impl<T: Prioritised> fmt::Debug for PriorityQueue<T>
@@ -114,47 +118,132 @@ impl<'q, T: Prioritised> Iterator for Drain<'q, T> {
 }
 
 impl<'q, T: Prioritised> SkipIterator for Drain<'q, T> {
-    fn peek_next(&mut self) -> Option<&Self::Item> {
+    type Item = T;
+
+    fn has_next(&self) -> bool {
+        self.queue.len() > self.skip
+    }
+
+    fn peek(&self) -> Option<&Self::Item> {
         self.queue.get(self.skip)
     }
 
-    fn skip_next(&mut self) {
-        self.skip += 1;
+    fn take(&mut self) -> Option<Self::Item> {
+        self.queue.dequeue(self.skip)
+    }
+
+    fn skip(&mut self) {
+        self.skip += 1
     }
 }
 
 pub(crate) mod may_be_taken {
-    use std::iter::Peekable;
+    use std::ops::Deref;
 
-    pub(crate) trait SkipIterator: Iterator {
-        fn peek_next(&mut self) -> Option<&<Self as Iterator>::Item>;
-        fn skip_next(&mut self);
+    /// Like an iterator, call `.maybe_next()` to get the next item. Unlike an iterator, only removes the item from the backing collection when calling `.into_inner()` on the returned `SkipableNext`. This way you can combine the behaviour of `.iter()` and `.into_iter()`, `SkipIterator` is equivalent to `.iter()` if `.into_inner()` is never called and equivalent to `into_iter()` if `into_inner()` is always called.
+    pub trait SkipIterator {
+        type Item;
+        fn maybe_next(&mut self) -> Option<SkipableNext<'_, Self>> {
+            if self.has_next() {
+                Some(SkipableNext {
+                    iter: self,
+                    taken: false,
+                })
+            } else {
+                None
+            }
+        }
+
+        /// does the iterator have a next item, if true, `peek()` and `take()` must return `Some(T)`
+        fn has_next(&self) -> bool;
+        /// a reference to the next item
+        fn peek(&self) -> Option<&Self::Item>;
+        /// remove and return the next item
+        fn take(&mut self) -> Option<Self::Item>;
+        /// skip the next item
+        fn skip(&mut self);
     }
 
-    impl<I> SkipIterator for Peekable<I>
-    where
-        I: Iterator,
-    {
-        fn peek_next(&mut self) -> Option<&Self::Item> {
-            self.peek()
-        }
+    pub struct SkipableNext<'i, I: SkipIterator + ?Sized> {
+        iter: &'i mut I,
+        taken: bool,
+    }
 
-        fn skip_next(&mut self) {
-            Iterator::next(self);
+    impl<'i, I: SkipIterator + ?Sized> Drop for SkipableNext<'i, I> {
+        fn drop(&mut self) {
+            if !self.taken {
+                self.iter.skip()
+            }
         }
     }
 
-    impl<I> SkipIterator for &mut Peekable<I>
+    impl<'i, I> Deref for SkipableNext<'i, I>
     where
-        I: Iterator,
+        I: SkipIterator,
     {
-        fn peek_next(&mut self) -> Option<&Self::Item> {
-            Peekable::peek(self)
+        type Target = I::Item;
+        fn deref(&self) -> &I::Item {
+            self.iter.peek().unwrap() // `SkipableNext` is only created after a `has_next()` check, so safe to unwrap
+        }
+    }
+
+    impl<'i, I: SkipIterator> SkipableNext<'i, I> {
+        pub fn into_inner(mut self) -> I::Item {
+            self.taken = true;
+            self.iter.take().unwrap() // `SkipableNext` is only created after a `has_next()` check, so safe to unwrap
+        }
+    }
+
+    pub struct VecSkipIter<'v, T> {
+        vec: &'v mut Vec<T>,
+        skip: usize,
+    }
+
+    impl<'v, T> VecSkipIter<'v, T> {
+        pub fn new(vec: &'v mut Vec<T>) -> Self {
+            Self { vec, skip: 0 }
+        }
+    }
+
+    impl<'v, T> SkipIterator for VecSkipIter<'v, T> {
+        type Item = T;
+
+        fn has_next(&self) -> bool {
+            self.vec.len() > self.skip
+        }
+        fn peek(&self) -> Option<&T> {
+            self.vec.get(self.skip)
         }
 
-        fn skip_next(&mut self) {
-            Iterator::next(self);
+        fn take(&mut self) -> Option<T> {
+            if self.has_next() {
+                Some(self.vec.remove(self.skip))
+            } else {
+                None
+            }
         }
+
+        fn skip(&mut self) {
+            self.skip += 1;
+        }
+    }
+
+    #[test]
+    fn test() {
+        let mut v = vec![1, 2, 3, 4];
+        let mut iter = VecSkipIter {
+            vec: &mut v,
+            skip: 0,
+        };
+        let next = iter.maybe_next().unwrap();
+        assert_eq!(*next, 1);
+        assert_eq!(next.into_inner(), 1);
+        let next = iter.maybe_next().unwrap();
+        assert_eq!(*next, 2);
+        drop(next);
+        let next = iter.maybe_next().unwrap();
+        assert_eq!(*next, 3);
+        assert_eq!(next.into_inner(), 3);
     }
 }
 
@@ -196,12 +285,12 @@ mod test {
         queue.enqueue(PrioritisedJob(1, 'a'));
         queue.enqueue(PrioritisedJob(1, 'b'));
         let mut drain = queue.drain();
-        assert_eq!(drain.peek_next(), Some(&PrioritisedJob(1, 'a')));
-        let vals: String = (&mut drain).take(1).map(|j| j.1).collect();
-        assert_eq!(vals, "a");
-        assert_eq!(drain.peek_next(), Some(&PrioritisedJob(1, 'b')));
-        let vals: String = drain.map(|j| j.1).collect();
-        assert_eq!(vals, "b");
+        let next = drain.maybe_next().unwrap();
+        assert_eq!(*next, PrioritisedJob(1, 'a'));
+        assert_eq!(next.into_inner(), PrioritisedJob(1, 'a'));
+        let next = drain.maybe_next().unwrap();
+        assert_eq!(*next, PrioritisedJob(1, 'b'));
+        assert_eq!(next.into_inner(), PrioritisedJob(1, 'b'));
     }
 
     #[test]
@@ -211,13 +300,14 @@ mod test {
         queue.enqueue(PrioritisedJob(1, 'b'));
         queue.enqueue(PrioritisedJob(1, 'c'));
         let mut drain = queue.drain();
-        assert_eq!(drain.peek_next(), Some(&PrioritisedJob(1, 'a')));
-        drain.skip_next();
-        assert_eq!(drain.peek_next(), Some(&PrioritisedJob(1, 'b')));
-        assert_eq!(drain.next(), Some(PrioritisedJob(1, 'b')));
-        assert_eq!(drain.peek_next(), Some(&PrioritisedJob(1, 'c')));
-        drain.skip_next();
-        assert_eq!(drain.peek_next(), None);
+        assert_eq!(drain.maybe_next().as_deref(), Some(&PrioritisedJob(1, 'a')));
+        {
+            let next = drain.maybe_next().unwrap();
+            assert_eq!(*next, PrioritisedJob(1, 'b'));
+            assert_eq!(next.into_inner(), PrioritisedJob(1, 'b'));
+        }
+        assert_eq!(drain.maybe_next().as_deref(), Some(&PrioritisedJob(1, 'c')));
+        assert_eq!(drain.maybe_next().as_deref(), None);
 
         let vals: String = queue.drain().map(|j| j.1).collect();
         assert_eq!(vals, "ac");

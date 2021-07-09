@@ -1,14 +1,87 @@
 use std::{
     fmt::Debug,
     iter,
-    sync::{Arc, Barrier, Mutex},
+    panic::{self, UnwindSafe},
+    sync::{Arc, Barrier, Mutex, MutexGuard},
     thread::{self, JoinHandle},
 };
+
+use crossbeam_channel::SendError;
 
 use crate::{
     source::{util::may_be_taken::SkipIterator, RecurringJob, SourceManager},
     Job, Prioritised,
 };
+
+/// Callback function to determine the maximum number of threads that could be occupied after a job of a particular priority level was executed
+pub(crate) type ConcurrencyLimitFn<J> =
+    dyn Fn(<J as Prioritised>::Priority) -> Option<u8> + Send + Sync;
+
+/// Spawn runners on `thread_num` threads, executing jobs from `jobs` and obeying the concurrency limit `concurrency_limit`
+pub fn spawn<J, R: RecurringJob<J> + Send + 'static>(
+    thread_num: usize,
+    jobs: Arc<Mutex<SourceManager<J, R>>>,
+    concurrency_limit: Box<ConcurrencyLimitFn<J>>,
+) -> Vec<JoinHandle<()>>
+where
+    J: Job + UnwindSafe + 'static,
+    <J as Prioritised>::Priority: Send,
+{
+    let barrier = Arc::new(Barrier::new(thread_num));
+    RunnerState::new(thread_num, concurrency_limit)
+        .map(move |(recv, state)| {
+            let jobs = jobs.clone();
+            let barrier = barrier.clone();
+            thread::spawn(move || {
+                run(state, jobs, barrier, recv);
+            })
+        })
+        .collect()
+}
+
+/// Run a runner loop
+fn run<J: Job + UnwindSafe + 'static, R: RecurringJob<J>>(
+    state: RunnerState<J>,
+    jobs: Arc<Mutex<super::source::SourceManager<J, R>>>,
+    ready_barrier: Arc<Barrier>,
+    recv: crossbeam_channel::Receiver<J>,
+) -> ! {
+    let mut job = if ready_barrier.wait().is_leader() {
+        // become the supervisor
+        state.become_supervisor();
+        run_supervisor(&state, &jobs)
+    } else {
+        // worker is available
+        recv.recv()
+            .expect("Available worker is not connected to shared runner state")
+    };
+    drop(recv);
+    loop {
+        let _ = panic::catch_unwind(|| job.execute()); // so a panicking job doesn't kill workers
+        job = match state.completed_job() {
+            PostJobTransition::BecomeAvailable(recv) => recv
+                .recv()
+                .expect("Available worker is not connected to shared runner state"),
+            PostJobTransition::BecomeSupervisor => run_supervisor(&state, &jobs),
+        };
+    }
+}
+
+/// Run the supervisor loop, jobs are retrieved and assigned. Returns when the supervisor has a job to execute and it becomes a worker
+fn run_supervisor<J: Job + 'static, R: RecurringJob<J>>(
+    state: &RunnerState<J>,
+    jobs: &Arc<Mutex<super::source::SourceManager<J, R>>>,
+) -> J {
+    let mut jobs = jobs.lock().expect("Job source poisoned, irrecoverable");
+    let mut wait_for_new = false;
+    loop {
+        if let Some(job) = state.assign_jobs(jobs.get(wait_for_new)) {
+            // become a worker
+            return job;
+        }
+        wait_for_new = true;
+    }
+}
 
 struct RunnerState<J: Job> {
     workers: Arc<Mutex<Vec<WorkerState<J>>>>,
@@ -42,7 +115,7 @@ impl<J: Job> RunnerState<J> {
     ///
     /// Panics if worker was not either working or not started
     fn completed_job(&self) -> PostJobTransition<J> {
-        let mut workers = self.workers.lock().unwrap();
+        let mut workers = self.workers();
         assert!(workers[self.worker_index].is_working());
         if workers.iter().any(|worker| worker.is_supervisor()) {
             let (send, recv) = crossbeam_channel::bounded(1);
@@ -55,7 +128,7 @@ impl<J: Job> RunnerState<J> {
     }
 
     fn become_supervisor(&self) {
-        let mut workers = self.workers.lock().unwrap();
+        let mut workers = self.workers();
         assert!(!workers.iter().any(|worker| worker.is_supervisor()));
         workers[self.worker_index] = WorkerState::Supervisor;
     }
@@ -68,42 +141,50 @@ impl<J: Job> RunnerState<J> {
     ///
     /// panics if this worker is not the supervisor
     fn assign_jobs(&self, mut jobs: impl SkipIterator<Item = J>) -> Option<J> {
-        let mut workers = self.workers.lock().unwrap();
+        let mut workers = self.workers();
         assert!(workers[self.worker_index].is_supervisor());
         let mut exclusions: Vec<_> = workers.iter().flat_map(|state| state.exclusion()).collect();
         let mut working_count = workers.iter().filter(|state| state.is_working()).count();
         let mut workers_iter = workers.iter_mut();
-        while let Some(job) = jobs.peek_next() {
+        while let Some(job) = jobs.maybe_next() {
             if let Some(max_concurrency) = (self.concurrency_limit)(job.priority()) {
                 if working_count as u8 >= max_concurrency {
-                    jobs.skip_next();
                     continue;
                 }
             }
             if exclusions.contains(&job.exclusion()) {
-                jobs.skip_next();
                 continue;
             }
             working_count += 1;
             exclusions.push(job.exclusion());
+            let mut job = job.into_inner();
             loop {
                 if let Some(worker) = workers_iter.next() {
                     if let WorkerState::Available(send) = worker {
                         let exclusion = job.exclusion();
-                        send.send(jobs.next().unwrap()).unwrap();
-                        *worker = WorkerState::Working(exclusion);
-                        break;
+                        if let Err(SendError(returned_job)) = send.send(job) {
+                            job = returned_job; // if a worker has died, the rest of the workers can continue
+                        } else {
+                            *worker = WorkerState::Working(exclusion);
+                            break;
+                        }
                     } else {
                         continue;
                     }
                 } else {
                     // no available worker for this job, supervisor to become worker
                     workers[self.worker_index] = WorkerState::Working(job.exclusion());
-                    return Some(jobs.next().unwrap());
+                    return Some(job);
                 }
             }
         }
         None
+    }
+
+    fn workers(&self) -> MutexGuard<Vec<WorkerState<J>>> {
+        self.workers
+            .lock()
+            .expect("Panics in worker state management are irrecoverable")
     }
 }
 
@@ -145,7 +226,7 @@ impl<J: Job> WorkerState<J> {
 
 #[cfg(test)]
 mod test {
-    use crate::{source::util::may_be_taken::SkipIterator, Job, NoExclusion, Prioritised};
+    use crate::{source::util::may_be_taken::VecSkipIter, Job, NoExclusion, Prioritised};
 
     use super::*;
 
@@ -184,39 +265,6 @@ mod test {
 
         fn priority(&self) -> Self::Priority {
             self.0
-        }
-    }
-
-    struct MaybeIterator<'v, T> {
-        vec: &'v mut Vec<T>,
-        next: usize,
-    }
-
-    impl<'v, T> MaybeIterator<'v, T> {
-        fn new(vec: &'v mut Vec<T>) -> Self {
-            Self { vec, next: 0 }
-        }
-    }
-
-    impl<'v, T> Iterator for MaybeIterator<'v, T> {
-        type Item = T;
-
-        fn next(&mut self) -> Option<Self::Item> {
-            if self.vec.len() > self.next {
-                return Some(self.vec.remove(self.next));
-            } else {
-                return None;
-            }
-        }
-    }
-
-    impl<'v, T> SkipIterator for MaybeIterator<'v, T> {
-        fn peek_next(&mut self) -> Option<&Self::Item> {
-            self.vec.get(self.next)
-        }
-
-        fn skip_next(&mut self) {
-            self.next += 1;
         }
     }
 
@@ -267,7 +315,7 @@ mod test {
             concurrency_limit: Arc::new(|()| None),
         };
         let mut jobs = vec![ExcludedJob(1)];
-        assert!(state.assign_jobs(MaybeIterator::new(&mut jobs)).is_none());
+        assert!(state.assign_jobs(VecSkipIter::new(&mut jobs)).is_none());
         let workers = state.workers.lock().unwrap();
         assert!(workers[0].is_supervisor());
         assert!(workers[1].is_working());
@@ -286,7 +334,7 @@ mod test {
             concurrency_limit: Arc::new(|()| None),
         };
         assert!(state
-            .assign_jobs(vec![ExcludedJob(2)].into_iter().peekable())
+            .assign_jobs(VecSkipIter::new(&mut vec![ExcludedJob(2)]))
             .is_some());
         let workers = state.workers.lock().unwrap();
         assert!(workers[0].is_working());
@@ -307,7 +355,7 @@ mod test {
             concurrency_limit: Arc::new(|()| None),
         };
         let mut jobs = vec![ExcludedJob(1)];
-        assert!(state.assign_jobs(MaybeIterator::new(&mut jobs)).is_none());
+        assert!(state.assign_jobs(VecSkipIter::new(&mut jobs)).is_none());
         {
             let workers = state.workers.lock().unwrap();
             assert!(workers[0].is_supervisor());
@@ -332,7 +380,7 @@ mod test {
             concurrency_limit: Arc::new(|()| None),
         };
         let mut jobs = vec![ExcludedJob(1), ExcludedJob(1)];
-        assert!(state.assign_jobs(MaybeIterator::new(&mut jobs)).is_none());
+        assert!(state.assign_jobs(VecSkipIter::new(&mut jobs)).is_none());
         {
             let workers = state.workers.lock().unwrap();
             assert!(workers[0].is_supervisor());
@@ -356,7 +404,7 @@ mod test {
             concurrency_limit: Arc::new(|priority| Some(priority)),
         };
         let mut jobs = vec![PrioritisedJob(1)];
-        assert!(state.assign_jobs(MaybeIterator::new(&mut jobs)).is_none());
+        assert!(state.assign_jobs(VecSkipIter::new(&mut jobs)).is_none());
         {
             let workers = state.workers.lock().unwrap();
             assert!(workers[0].is_supervisor());
@@ -377,7 +425,7 @@ mod test {
             concurrency_limit: Arc::new(|priority| Some(priority)),
         };
         assert!(state
-            .assign_jobs(vec![PrioritisedJob(2)].into_iter().peekable())
+            .assign_jobs(VecSkipIter::new(&mut vec![PrioritisedJob(2)]))
             .is_some());
         {
             let workers = state.workers.lock().unwrap();
@@ -400,7 +448,7 @@ mod test {
             concurrency_limit: Arc::new(|priority| Some(priority)),
         };
         let mut jobs = vec![PrioritisedJob(2), PrioritisedJob(2)];
-        assert!(state.assign_jobs(MaybeIterator::new(&mut jobs)).is_none());
+        assert!(state.assign_jobs(VecSkipIter::new(&mut jobs)).is_none());
         {
             let workers = state.workers.lock().unwrap();
             assert!(workers[0].is_supervisor());
@@ -414,9 +462,7 @@ mod test {
 
     #[test]
     fn unassigned_jobs_not_consumed() {
-        let mut it = vec![PrioritisedJob(100), PrioritisedJob(100)]
-            .into_iter()
-            .peekable();
+        let mut jobs = vec![PrioritisedJob(100), PrioritisedJob(100)];
         let state = RunnerState::<PrioritisedJob> {
             workers: Arc::new(Mutex::new(vec![
                 WorkerState::Supervisor,
@@ -425,70 +471,7 @@ mod test {
             worker_index: 0,
             concurrency_limit: Arc::new(|priority| Some(priority)),
         };
-        assert!(state.assign_jobs(&mut it).is_some());
-        assert_eq!(it.count(), 1);
+        assert!(state.assign_jobs(VecSkipIter::new(&mut jobs)).is_some());
+        assert_eq!(jobs.len(), 1);
     }
-}
-
-fn run<J: Job + 'static, R: RecurringJob<J>>(
-    state: RunnerState<J>,
-    jobs: Arc<Mutex<super::source::SourceManager<J, R>>>,
-    ready_barrier: Arc<Barrier>,
-    recv: crossbeam_channel::Receiver<J>,
-) {
-    let mut job = if ready_barrier.wait().is_leader() {
-        // become the supervisor
-        state.become_supervisor();
-        run_supervisor(&state, &jobs)
-    } else {
-        // worker is available
-        recv.recv().unwrap()
-    };
-    drop(recv);
-    loop {
-        job.execute();
-        job = match state.completed_job() {
-            PostJobTransition::BecomeAvailable(recv) => recv.recv().unwrap(),
-            PostJobTransition::BecomeSupervisor => run_supervisor(&state, &jobs),
-        };
-    }
-}
-
-fn run_supervisor<J: Job + 'static, R: RecurringJob<J>>(
-    state: &RunnerState<J>,
-    jobs: &Arc<Mutex<super::source::SourceManager<J, R>>>,
-) -> J {
-    let mut jobs = jobs.lock().unwrap();
-    let mut wait_for_new = false;
-    loop {
-        if let Some(job) = state.assign_jobs(jobs.get(wait_for_new)) {
-            // become a worker
-            return job;
-        }
-        wait_for_new = true;
-    }
-}
-
-pub(crate) type ConcurrencyLimitFn<J> =
-    dyn Fn(<J as Prioritised>::Priority) -> Option<u8> + Send + Sync;
-
-pub fn spawn<J, R: RecurringJob<J> + Send + 'static>(
-    thread_num: usize,
-    jobs: Arc<Mutex<SourceManager<J, R>>>,
-    concurrency_limit: Box<ConcurrencyLimitFn<J>>,
-) -> Vec<JoinHandle<()>>
-where
-    J: Job + 'static,
-    <J as Prioritised>::Priority: Send,
-{
-    let barrier = Arc::new(Barrier::new(thread_num));
-    RunnerState::new(thread_num, concurrency_limit)
-        .map(move |(recv, state)| {
-            let jobs = jobs.clone();
-            let barrier = barrier.clone();
-            thread::spawn(move || {
-                run(state, jobs, barrier, recv);
-            })
-        })
-        .collect()
 }

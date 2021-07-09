@@ -4,6 +4,7 @@
 ///! * Jobs can be added the the queue from `stdin`, one per line `{seconds} [priority] [exclusion]`, ie' `3 5 q`, the later entries can be left out
 ///! * If it exists, a file `examples/poll` will be read every 10 seconds and jobs created based on the same format (notice that if there are more jobs than threads, the low priority jobs never get scheduled) the jobs should be prioritised with highest first
 use std::{
+    error::Error,
     fs,
     io::{BufRead, BufReader},
     str::FromStr,
@@ -13,14 +14,16 @@ use std::{
 
 use chief::{ExclusionOption, Job, JobRunner, MergeResult, Prioritised};
 
-fn main() {
+fn main() -> Result<(), Box<dyn Error>> {
     let mut runner = JobRunner::builder();
-    let file = fs::File::open("examples/poll").unwrap();
+    let file = fs::File::open("examples/poll")?;
     let r = BufReader::new(file);
-    for line in r.lines().take_while(Result::is_ok).map(Result::unwrap) {
-        let (interval, job) = line.split_once(' ').unwrap();
-        let interval = Duration::from_secs(interval.parse().unwrap());
-        let job: WaitJob = job.parse().unwrap();
+    for line in r.lines().take_while(Result::is_ok).flat_map(Result::ok) {
+        let (interval, job) = line
+            .split_once(' ')
+            .ok_or("jobs in poll file must consists of at least {interval} {duration}")?;
+        let interval = Duration::from_secs(interval.parse()?);
+        let job: WaitJob = job.parse()?;
         println!("Recurring every {:?} : {:?}", interval, job);
         runner.set_recurring(interval, Instant::now(), job);
     }
@@ -31,15 +34,16 @@ fn main() {
     let mut input = String::new();
     while let Ok(_) = stdin.read_line(&mut input) {
         if input == "\n" {
-            return;
+            return Ok(());
         }
         if let Ok(job) = input.parse() {
-            runner.send(job).unwrap()
+            runner.send(job)?;
         } else {
             println!("Couldnt parse {:?}", input);
         }
         input.clear();
     }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -82,9 +86,9 @@ impl Prioritised for WaitJob {
 }
 
 impl FromStr for WaitJob {
-    type Err = ();
+    type Err = &'static str;
 
-    fn from_str(line: &str) -> Result<WaitJob, ()> {
+    fn from_str(line: &str) -> Result<WaitJob, Self::Err> {
         let mut split = line.trim().split_whitespace();
         if let Some(duration) = split.next() {
             match duration.parse() {
@@ -99,6 +103,6 @@ impl FromStr for WaitJob {
                 errs => println!("Errors parsing duration {:?}: {:?}", duration, errs),
             }
         }
-        Err(())
+        Err("Failed to parse WaitJob")
     }
 }
