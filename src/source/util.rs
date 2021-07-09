@@ -376,12 +376,7 @@ pub(crate) mod prioritized_mpsc {
     }
 
     impl<T: Prioritised> Receiver<T> {
-        /// Waits up to `timeout` for the first message, if none are currently available, if some are available it returns immediately with an iterator over the currently available messages in priority order, any items not iterated when the iterator is dropped are left
-        pub fn iter_timeout(&mut self, timeout: Duration) -> super::Drain<T> {
-            self.process_queue_timeout(timeout, false, |_| {});
-            self.drain()
-        }
-
+        /// Processes things currently ready in the queue without blocking
         pub fn process_queue_ready(&mut self, mut cb: impl FnMut(&T)) -> bool {
             let mut has_new = false;
             for item in self.recv.try_iter() {
@@ -392,6 +387,7 @@ pub(crate) mod prioritized_mpsc {
             has_new
         }
 
+        /// Waits up to `timeout` for the first message, if none are currently available, if some are available (and `wait_for_new` is false) it returns immediately
         pub fn process_queue_timeout(
             &mut self,
             timeout: Duration,
@@ -413,6 +409,7 @@ pub(crate) mod prioritized_mpsc {
             }
         }
 
+        /// iterator over the currently available messages in priority order, any items not iterated when the iterator is dropped are left
         pub fn drain(&mut self) -> super::Drain<T> {
             self.queue.drain()
         }
@@ -483,32 +480,35 @@ pub(crate) mod prioritized_mpsc {
         }
 
         #[test]
-        fn iter_timeout_expires() {
+        fn timeout_expires() {
             let (_send, mut recv) = channel::<Tester>();
-            assert_eq!(recv.iter_timeout(Duration::from_micros(1)).count(), 0);
+            recv.process_queue_timeout(Duration::from_micros(1), false, |_| {});
+            assert_eq!(recv.drain().count(), 0);
         }
 
         #[test]
-        fn iter_timeout_returns_immediately() {
+        fn returns_immediately() {
             let (send, mut recv) = channel::<Tester>();
             thread::spawn(move || {
                 send.send(Tester(0)).unwrap();
             });
             let instant = Instant::now();
+            recv.process_queue_timeout(Duration::from_millis(1), false, |_| {});
             assert_eq!(
-                recv.iter_timeout(Duration::from_millis(1)).next().unwrap(),
+                recv.drain().next().unwrap(),
                 Tester(0)
             );
             assert!(Instant::now().duration_since(instant) < Duration::from_millis(1));
         }
 
         #[test]
-        fn iter_timeout_bunch_of_items_are_prioritised() {
+        fn bunch_of_items_are_prioritised() {
             let (send, mut recv) = channel::<Tester>();
             send.send(Tester(2)).unwrap();
             send.send(Tester(3)).unwrap();
             send.send(Tester(1)).unwrap();
-            let items: Vec<_> = recv.iter_timeout(Duration::from_millis(1)).collect();
+            recv.process_queue_timeout(Duration::from_millis(1), false, |_| {});
+            let items: Vec<_> = recv.drain().collect();
             assert_eq!(items, vec![Tester(3), Tester(2), Tester(1)]);
         }
     }

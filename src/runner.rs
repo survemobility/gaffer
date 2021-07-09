@@ -39,10 +39,10 @@ where
         .collect()
 }
 
-/// Run a runner loop
+/// Run the runner loop, `ready_barrier` syncronizes with the start of the other runners and decides the initial supervisor
 fn run<J: Job + UnwindSafe + 'static, R: RecurringJob<J>>(
     state: RunnerState<J>,
-    jobs: Arc<Mutex<super::source::SourceManager<J, R>>>,
+    jobs: Arc<Mutex<SourceManager<J, R>>>,
     ready_barrier: Arc<Barrier>,
     recv: crossbeam_channel::Receiver<J>,
 ) -> ! {
@@ -70,10 +70,10 @@ fn run<J: Job + UnwindSafe + 'static, R: RecurringJob<J>>(
 /// Run the supervisor loop, jobs are retrieved and assigned. Returns when the supervisor has a job to execute and it becomes a worker
 fn run_supervisor<J: Job + 'static, R: RecurringJob<J>>(
     state: &RunnerState<J>,
-    jobs: &Arc<Mutex<super::source::SourceManager<J, R>>>,
+    jobs: &Arc<Mutex<SourceManager<J, R>>>,
 ) -> J {
-    let mut jobs = jobs.lock().expect("Job source poisoned, irrecoverable");
     let mut wait_for_new = false;
+    let mut jobs = jobs.lock().expect("Job source poisoned, irrecoverable");
     loop {
         if let Some(job) = state.assign_jobs(jobs.get(wait_for_new)) {
             // become a worker
