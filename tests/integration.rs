@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use foreman::*;
+use chief::*;
 
 macro_rules! assert_recv {
     ($helper:expr, $expect:literal) => {

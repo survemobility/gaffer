@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use foreman::{ExclusionOption, Job, JobRunner, MergeResult, Prioritised};
+use chief::{ExclusionOption, Job, JobRunner, MergeResult, Prioritised};
 
 fn main() {
     let mut runner = JobRunner::builder();
