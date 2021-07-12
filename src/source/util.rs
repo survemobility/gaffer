@@ -212,6 +212,7 @@ pub(crate) mod may_be_taken {
         skip: usize,
     }
 
+    #[allow(dead_code)]
     impl<'v, T> VecSkipIter<'v, T> {
         pub fn new(vec: &'v mut Vec<T>) -> Self {
             Self { vec, skip: 0 }

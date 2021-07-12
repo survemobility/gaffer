@@ -22,8 +22,8 @@ impl<J: Prioritised + Send + Clone + 'static> SourceManager<J, IntervalRecurring
     /// Set a job as recurring, the job will be enqueued every time `interval` passes since the last enqueue of a matching job
     pub fn set_recurring(&mut self, interval: Duration, last_enqueue: Instant, job: J) {
         self.recurring.push(IntervalRecurringJob {
-            interval,
             last_enqueue,
+            interval,
             job,
         });
     }

@@ -129,8 +129,8 @@ impl<J: Job + Send + Clone + 'static> Builder<J, IntervalRecurringJob<J>> {
     /// Set a job as recurring, the job will be executed every time `interval` passes since the last execution of a matching job
     pub fn set_recurring(&mut self, interval: Duration, last_enqueue: Instant, job: J) {
         self.recurring.push(IntervalRecurringJob {
-            interval,
             last_enqueue,
+            interval,
             job,
         });
     }
