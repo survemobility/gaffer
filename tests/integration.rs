@@ -91,6 +91,7 @@ fn integration_2_threads_block() {
 }
 
 #[test]
+/// this test is a little flaky
 fn integration_2_threads_lower_than_recurring() {
     let helper = TestHelper::new(2, Duration::from_millis(1), "xy");
 

@@ -364,12 +364,8 @@ mod test {
 }
 
 pub(crate) mod prioritized_mpsc {
-    use std::{
-        fmt,
-        sync::{Arc, Mutex, MutexGuard},
-        thread,
-        time::Duration,
-    };
+    use parking_lot::{Mutex, MutexGuard};
+    use std::{fmt, sync::Arc, thread, time::Duration};
 
     use crate::Prioritised;
 
@@ -394,7 +390,7 @@ pub(crate) mod prioritized_mpsc {
         /// Processes things currently ready in the queue without blocking
         pub fn process_queue_ready(&mut self, mut cb: impl FnMut(&T)) -> bool {
             let mut has_new = false;
-            let mut queue = self.queue.lock().unwrap();
+            let mut queue = self.queue.lock();
             for item in self.recv.try_iter() {
                 cb(&item);
                 queue.enqueue(item);
@@ -411,11 +407,11 @@ pub(crate) mod prioritized_mpsc {
             mut cb: impl FnMut(&T),
         ) {
             let has_new = self.process_queue_ready(&mut cb);
-            if !has_new && (wait_for_new || self.queue.lock().unwrap().is_empty()) {
+            if !has_new && (wait_for_new || self.queue.lock().is_empty()) {
                 match self.recv.recv_timeout(timeout) {
                     Ok(item) => {
                         cb(&item);
-                        self.queue.lock().unwrap().enqueue(item);
+                        self.queue.lock().enqueue(item);
                     }
                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
                     Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
@@ -427,11 +423,11 @@ pub(crate) mod prioritized_mpsc {
 
         /// iterator over the currently available messages in priority order, any items not iterated when the iterator is dropped are left
         pub fn drain(&mut self) -> super::Drain<T, MutexGuard<PriorityQueue<T>>> {
-            PriorityQueue::drain_deref(self.queue.lock().unwrap())
+            PriorityQueue::drain_deref(self.queue.lock())
         }
 
         pub fn enqueue(&mut self, item: T) {
-            self.queue.lock().unwrap().enqueue(item);
+            self.queue.lock().enqueue(item);
         }
 
         pub fn queue(&self) -> Arc<Mutex<PriorityQueue<T>>> {
@@ -453,10 +449,7 @@ pub(crate) mod prioritized_mpsc {
 
     #[cfg(test)]
     mod test {
-        use std::{
-            thread,
-            time::{Duration, Instant},
-        };
+        use std::time::{Duration, Instant};
 
         use super::*;
 

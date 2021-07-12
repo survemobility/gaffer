@@ -1,8 +1,9 @@
+use parking_lot::{Mutex, MutexGuard};
 use std::{
     fmt::Debug,
     iter,
     panic::{self, UnwindSafe},
-    sync::{Arc, Barrier, Mutex, MutexGuard},
+    sync::{Arc, Barrier},
     thread::{self, JoinHandle},
 };
 
@@ -30,7 +31,7 @@ where
     J: Job + UnwindSafe + 'static,
     <J as Prioritised>::Priority: Send,
 {
-    let queue = jobs.lock().unwrap().queue();
+    let queue = jobs.lock().queue();
     let barrier = Arc::new(Barrier::new(thread_num));
     RunnerState::new(thread_num, concurrency_limit)
         .map(move |(recv, state)| {
@@ -64,7 +65,7 @@ fn run<J: Job + UnwindSafe + 'static, R: RecurringJob<J>>(
     drop(recv);
     loop {
         let _ = panic::catch_unwind(|| job.execute()); // so a panicking job doesn't kill workers
-        let transition = state.completed_job(queue.lock().unwrap().drain());
+        let transition = state.completed_job(queue.lock().drain());
         job = match transition {
             PostJobTransition::BecomeAvailable(recv) => recv
                 .recv()
@@ -81,7 +82,7 @@ fn run_supervisor<J: Job + 'static, R: RecurringJob<J>>(
     jobs: &Arc<Mutex<SourceManager<J, R>>>,
 ) -> J {
     let mut wait_for_new = false;
-    let mut jobs = jobs.lock().expect("Job source poisoned, irrecoverable");
+    let mut jobs = jobs.lock();
     loop {
         if let Some(job) = state.assign_jobs(jobs.get(wait_for_new)) {
             // become a worker
@@ -205,9 +206,7 @@ impl<J: Job> RunnerState<J> {
     }
 
     fn workers(&self) -> MutexGuard<Vec<WorkerState<J>>> {
-        self.workers
-            .lock()
-            .expect("Panics in worker state management are irrecoverable")
+        self.workers.lock()
     }
 }
 
@@ -307,7 +306,7 @@ mod test {
         };
         let job_recv = state.completed_job(PriorityQueue::new().drain());
         assert!(matches!(job_recv, PostJobTransition::BecomeAvailable(_)));
-        let workers = state.workers.lock().unwrap();
+        let workers = state.workers.lock();
         assert!(matches!(workers[0], WorkerState::Available(_)));
     }
 
@@ -324,7 +323,7 @@ mod test {
         };
         let job_recv = state.completed_job(PriorityQueue::new().drain());
         assert!(matches!(job_recv, PostJobTransition::BecomeSupervisor));
-        let workers = state.workers.lock().unwrap();
+        let workers = state.workers.lock();
         assert!(workers[0].is_supervisor());
     }
 
@@ -347,7 +346,7 @@ mod test {
             "{:?}",
             job_recv
         );
-        let workers = state.workers.lock().unwrap();
+        let workers = state.workers.lock();
         assert!(workers[0].is_working());
         assert!(queue.is_empty());
     }
@@ -367,7 +366,7 @@ mod test {
         queue.enqueue(ExcludedJob(1));
         let job_recv = state.completed_job(queue.drain());
         assert!(matches!(job_recv, PostJobTransition::BecomeSupervisor));
-        let workers = state.workers.lock().unwrap();
+        let workers = state.workers.lock();
         assert!(workers[0].is_supervisor());
         assert!(!queue.is_empty());
     }
@@ -387,7 +386,7 @@ mod test {
         queue.enqueue(PrioritisedJob(1));
         let job_recv = state.completed_job(queue.drain());
         assert!(matches!(job_recv, PostJobTransition::BecomeSupervisor));
-        let workers = state.workers.lock().unwrap();
+        let workers = state.workers.lock();
         assert!(workers[0].is_supervisor());
         assert!(!queue.is_empty());
     }
@@ -406,7 +405,7 @@ mod test {
         };
         let mut jobs = vec![ExcludedJob(1)];
         assert!(state.assign_jobs(VecSkipIter::new(&mut jobs)).is_none());
-        let workers = state.workers.lock().unwrap();
+        let workers = state.workers.lock();
         assert!(workers[0].is_supervisor());
         assert!(workers[1].is_working());
         assert!(recv.try_recv().is_ok());
@@ -426,7 +425,7 @@ mod test {
         assert!(state
             .assign_jobs(VecSkipIter::new(&mut vec![ExcludedJob(2)]))
             .is_some());
-        let workers = state.workers.lock().unwrap();
+        let workers = state.workers.lock();
         assert!(workers[0].is_working());
         assert!(workers[1].is_working());
     }
@@ -447,7 +446,7 @@ mod test {
         let mut jobs = vec![ExcludedJob(1)];
         assert!(state.assign_jobs(VecSkipIter::new(&mut jobs)).is_none());
         {
-            let workers = state.workers.lock().unwrap();
+            let workers = state.workers.lock();
             assert!(workers[0].is_supervisor());
             assert!(workers[1].is_working());
             assert!(matches!(workers[2], WorkerState::Available(_)));
@@ -472,7 +471,7 @@ mod test {
         let mut jobs = vec![ExcludedJob(1), ExcludedJob(1)];
         assert!(state.assign_jobs(VecSkipIter::new(&mut jobs)).is_none());
         {
-            let workers = state.workers.lock().unwrap();
+            let workers = state.workers.lock();
             assert!(workers[0].is_supervisor());
             assert!(workers[1].is_working());
             assert!(matches!(workers[2], WorkerState::Available(_)));
@@ -496,7 +495,7 @@ mod test {
         let mut jobs = vec![PrioritisedJob(1)];
         assert!(state.assign_jobs(VecSkipIter::new(&mut jobs)).is_none());
         {
-            let workers = state.workers.lock().unwrap();
+            let workers = state.workers.lock();
             assert!(workers[0].is_supervisor());
             assert!(workers[1].is_working());
         }
@@ -518,7 +517,7 @@ mod test {
             .assign_jobs(VecSkipIter::new(&mut vec![PrioritisedJob(2)]))
             .is_some());
         {
-            let workers = state.workers.lock().unwrap();
+            let workers = state.workers.lock();
             assert!(workers[0].is_working());
             assert!(workers[1].is_working());
         }
@@ -540,7 +539,7 @@ mod test {
         let mut jobs = vec![PrioritisedJob(2), PrioritisedJob(2)];
         assert!(state.assign_jobs(VecSkipIter::new(&mut jobs)).is_none());
         {
-            let workers = state.workers.lock().unwrap();
+            let workers = state.workers.lock();
             assert!(workers[0].is_supervisor());
             assert!(workers[1].is_working());
             assert!(workers[2].is_working());

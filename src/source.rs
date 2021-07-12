@@ -1,7 +1,8 @@
+use parking_lot::{Mutex, MutexGuard};
 use std::{
     fmt,
     iter::Iterator,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -261,10 +262,10 @@ mod test {
     fn queued_resets_recurring() {
         let (send, mut manager) = SourceManager::new();
         let start = Instant::now();
-        let half_interval_ago = start - Duration::from_micros(1000);
-        manager.set_recurring(Duration::from_millis(2), half_interval_ago, Tester(1));
-        manager.set_recurring(Duration::from_millis(2), half_interval_ago, Tester(2));
-        manager.set_recurring(Duration::from_millis(2), half_interval_ago, Tester(3));
+        let half_interval_ago = start - Duration::from_millis(5);
+        manager.set_recurring(Duration::from_millis(10), half_interval_ago, Tester(1));
+        manager.set_recurring(Duration::from_millis(10), half_interval_ago, Tester(2));
+        manager.set_recurring(Duration::from_millis(10), half_interval_ago, Tester(3));
         send.send(Tester(2)).unwrap();
         assert_eq!(
             manager.get(false).collect::<Vec<_>>(),
@@ -272,11 +273,12 @@ mod test {
             "Wrong result after {:?}",
             Instant::now().duration_since(start)
         );
+        let restart = Instant::now();
         assert_eq!(
             manager.get(false).collect::<Vec<_>>(),
             vec![Tester(3), Tester(1)],
             "Wrong result after {:?}",
-            Instant::now().duration_since(start)
+            Instant::now().duration_since(restart)
         );
         assert_eq!(manager.get(false).collect::<Vec<_>>(), vec![Tester(2)]);
     }
@@ -329,6 +331,6 @@ mod test {
             manager.get(false).collect::<Vec<_>>(),
             vec![Tester(3), Tester(2), Tester(1)]
         );
-        assert!(Instant::now().duration_since(before) < Duration::from_micros(100));
+        assert!(Instant::now().duration_since(before) < Duration::from_millis(1));
     }
 }

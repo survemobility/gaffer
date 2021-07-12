@@ -1,11 +1,12 @@
-use std::future::Future;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::MutexGuard;
-use std::sync::PoisonError;
-use std::task::{Poll, Waker};
+use parking_lot::{Mutex, MutexGuard};
+use std::{
+    future::Future,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    task::{Poll, Waker},
+};
 
 /// The sending side of a promise which can be used to complete a future. If 2 promises are of the same type, they can be merged and then all the futures will be resolved with clones of the result.
 pub struct Promise<T> {
@@ -33,7 +34,7 @@ impl<T> Default for PromiseShared<T> {
 
 impl<T> PromiseShared<T> {
     fn inner(&self) -> MutexGuard<PromiseInner<T>> {
-        self.inner.lock().unwrap_or_else(PoisonError::into_inner) // none of the promise inner state would be left inconsistent in the event of a panic, so we can safely ignore if the mutex is poisoned
+        self.inner.lock()
     }
 }
 
