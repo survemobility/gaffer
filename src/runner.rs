@@ -38,9 +38,12 @@ where
             let jobs = jobs.clone();
             let queue = queue.clone();
             let barrier = barrier.clone();
-            thread::Builder::new().name(format!("chief#{}", state.worker_index)).spawn(move || {
-                run(state, jobs, queue, barrier, recv);
-            }).unwrap()
+            thread::Builder::new()
+                .name(format!("chief#{}", state.worker_index))
+                .spawn(move || {
+                    run(state, jobs, queue, barrier, recv);
+                })
+                .unwrap()
         })
         .collect()
 }
@@ -132,20 +135,31 @@ impl<J: Job> RunnerState<J> {
     fn completed_job(&self, mut jobs: impl SkipIterator<Item = J>) -> PostJobTransition<J> {
         let mut workers = self.workers();
         assert!(workers[self.worker_index].is_working());
-        log::debug!("{}: Job completed by worker", std::thread::current().name().unwrap_or_default());
+        log::debug!(
+            "{}: Job completed by worker",
+            std::thread::current().name().unwrap_or_default()
+        );
         let working_count = workers.iter().filter(|state| state.is_working()).count() - 1; // not including self
         while let Some(job) = jobs.maybe_next() {
             if let Some(max_concurrency) = (self.concurrency_limit)(job.priority()) {
                 if working_count as u8 >= max_concurrency {
-                    log::trace!("{}: > Can't continue onto this job as {} working and {} max concurrency", std::thread::current().name().unwrap_or_default(), working_count, max_concurrency);
+                    log::trace!(
+                        "{}: > Can't continue onto this job as {} working and {} max concurrency",
+                        std::thread::current().name().unwrap_or_default(),
+                        working_count,
+                        max_concurrency
+                    );
                     continue;
                 }
             }
             if workers
-            .iter()
-            .any(|worker| worker.exclusion() == Some(job.exclusion()))
+                .iter()
+                .any(|worker| worker.exclusion() == Some(job.exclusion()))
             {
-                log::trace!("{}: > Can't continue onto this job as exclusion matches", std::thread::current().name().unwrap_or_default());
+                log::trace!(
+                    "{}: > Can't continue onto this job as exclusion matches",
+                    std::thread::current().name().unwrap_or_default()
+                );
                 continue;
             }
             return PostJobTransition::KeepWorking(job.into_inner());
@@ -153,10 +167,16 @@ impl<J: Job> RunnerState<J> {
         if workers.iter().any(|worker| worker.is_supervisor()) {
             let (send, recv) = crossbeam_channel::bounded(1);
             workers[self.worker_index] = WorkerState::Available(send);
-            log::trace!("{}: > Supervisor found, becoming available", std::thread::current().name().unwrap_or_default());
+            log::trace!(
+                "{}: > Supervisor found, becoming available",
+                std::thread::current().name().unwrap_or_default()
+            );
             PostJobTransition::BecomeAvailable(recv)
         } else {
-            log::trace!("{}: > No supervisor found, becoming supervisor", std::thread::current().name().unwrap_or_default());
+            log::trace!(
+                "{}: > No supervisor found, becoming supervisor",
+                std::thread::current().name().unwrap_or_default()
+            );
             workers[self.worker_index] = WorkerState::Supervisor;
             PostJobTransition::BecomeSupervisor
         }
@@ -174,7 +194,11 @@ impl<J: Job> RunnerState<J> {
         assert!(workers[self.worker_index].is_supervisor());
         let mut exclusions: Vec<_> = workers.iter().flat_map(|state| state.exclusion()).collect();
         let mut working_count = workers.iter().filter(|state| state.is_working()).count();
-        log::debug!("{}: Supervisor to assign jobs, {} currently working", std::thread::current().name().unwrap_or_default(), working_count);
+        log::debug!(
+            "{}: Supervisor to assign jobs, {} currently working",
+            std::thread::current().name().unwrap_or_default(),
+            working_count
+        );
         let mut workers_iter = workers.iter_mut();
         while let Some(job) = jobs.maybe_next() {
             if let Some(max_concurrency) = (self.concurrency_limit)(job.priority()) {
