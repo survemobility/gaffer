@@ -34,7 +34,13 @@ macro_rules! assert_recv_unordered {
             ));
             actual.push(c);
         }
-        assert_eq!(expect, actual.chars().collect::<HashSet<_>>());
+        assert_eq!(
+            expect,
+            actual.chars().collect::<HashSet<_>>(),
+            "{:?} didn't match {:?}",
+            $expect,
+            actual
+        );
     };
 }
 
@@ -79,33 +85,13 @@ fn integration_2_thread_limited() {
 fn integration_2_threads_block() {
     let helper = TestHelper::new(2, Duration::from_millis(10), "x");
 
-    helper.wait_micros(300, 1, 'a');
-    helper.wait_micros(1000, 1, 'e');
-    helper.pause(200); // a & e get picked up first, the rest are waiting once a is done and are done in parallel with e
+    helper.wait_micros(2000, 1, 'a');
+    helper.wait_micros(5000, 1, 'e');
+    helper.pause(1000); // a & e get picked up first, the rest are waiting once a is done and are done in parallel with e
     helper.wait_micros(10, 1, 'c');
     helper.wait_micros(10, 1, 'd');
     helper.wait_micros(10, 3, 'b');
     assert_recv!(helper, "abcde");
-}
-
-#[test]
-/// this test is a little flaky
-fn integration_2_threads_lower_than_recurring() {
-    let helper = TestHelper::new(2, Duration::from_millis(1), "xy");
-
-    helper.pause(1000); // recurring is ready
-    helper.wait_micros(10, 1, 'f'); // lower priority, comes after the x & y
-    assert_recv_unordered!(helper, "xy"); // unfortunately the ordering of y & z is non-deterministic as it depends on how quickly the worker thread wakes up
-    assert_recv!(helper, "f");
-}
-
-#[test]
-fn integration_2_threads_higher_than_recurring() {
-    let helper = TestHelper::new(2, Duration::from_millis(1), "x");
-
-    helper.pause(1000); // poll is ready
-    helper.wait_micros(10, 3, 'g'); // higher priority, comes before the z
-    assert_recv_unordered!(helper, "gx"); // unfortunately the ordering of g & z is non-deterministic as it depends on how quickly the worker thread wakes up
 }
 
 #[test]
