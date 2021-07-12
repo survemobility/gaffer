@@ -15,7 +15,8 @@ use std::{
 use chief::{ExclusionOption, Job, JobRunner, MergeResult, Prioritised};
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let mut runner = JobRunner::builder();
+    let mut runner = JobRunner::builder()
+        .limit_concurrency(|_prioirty| Some(1));
     let file = fs::File::open("examples/poll")?;
     let r = BufReader::new(file);
     for line in r.lines().take_while(Result::is_ok).flat_map(Result::ok) {

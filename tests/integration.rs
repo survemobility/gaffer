@@ -63,9 +63,7 @@ fn integration_1_thread_recurrance() {
     assert_recv!(helper, "xyz");
 }
 
-// Currently failing, there is a bug with thread limiting which leads to large delays before scheduling jobs with thread limits
 #[test]
-#[ignore]
 fn integration_2_thread_limited() {
     let helper =
         TestHelper::new_runner(JobRunner::builder().limit_concurrency(|_| Some(1)).build(2));
