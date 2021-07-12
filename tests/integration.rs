@@ -7,20 +7,34 @@ use std::{
 use chief::*;
 use crossbeam_channel::Sender;
 
+const TIMEOUT: Duration = Duration::from_millis(100);
+
 macro_rules! assert_recv {
     ($helper:expr, $expect:literal) => {
         let mut actual = String::default();
         while $expect.len() > actual.len() {
-            let c = $helper
-                .recv
-                .recv_timeout(Duration::from_millis(100))
-                .expect(&format!(
-                    "Timed out with only {:?}, expected {:?}",
-                    actual, $expect
-                ));
+            let c = $helper.recv.recv_timeout(TIMEOUT).expect(&format!(
+                "Timed out after {:?} with only {:?}, expected {:?}",
+                TIMEOUT, actual, $expect
+            ));
             actual.push(c);
         }
         assert_eq!($expect, actual);
+    };
+}
+
+macro_rules! assert_recv_unordered {
+    ($helper:expr, $expect:literal) => {
+        let expect: HashSet<_> = $expect.chars().collect();
+        let mut actual = String::default();
+        while expect.len() > actual.len() {
+            let c = $helper.recv.recv_timeout(TIMEOUT).expect(&format!(
+                "Timed out after {:?} with only {:?}, expected {:?}",
+                TIMEOUT, actual, $expect
+            ));
+            actual.push(c);
+        }
+        assert_eq!(expect, actual.chars().collect::<HashSet<_>>());
     };
 }
 
@@ -29,7 +43,7 @@ fn integration_1_thread_blocked() {
     let helper = TestHelper::new(1, Duration::from_millis(10), "x");
 
     helper.wait_micros(400, 1, 'a');
-    helper.pause(300); // a gets picked up alone, the rest are waiting once a is ready
+    helper.pause(200); // a gets picked up alone, the rest are waiting once a is ready
     helper.wait_micros(10, 1, 'c');
     helper.wait_micros(10, 1, 'd');
     helper.wait_micros(10, 1, 'e');
@@ -82,7 +96,7 @@ fn integration_2_threads_lower_than_recurring() {
 
     helper.pause(1000); // recurring is ready
     helper.wait_micros(10, 1, 'f'); // lower priority, comes after the x & y
-    helper.assert_recv_unordered("xy"); // unfortunately the ordering of y & z is non-deterministic as it depends on how quickly the worker thread wakes up
+    assert_recv_unordered!(helper, "xy"); // unfortunately the ordering of y & z is non-deterministic as it depends on how quickly the worker thread wakes up
     assert_recv!(helper, "f");
 }
 
@@ -92,7 +106,7 @@ fn integration_2_threads_higher_than_recurring() {
 
     helper.pause(1000); // poll is ready
     helper.wait_micros(10, 3, 'g'); // higher priority, comes before the z
-    helper.assert_recv_unordered("gx"); // unfortunately the ordering of g & z is non-deterministic as it depends on how quickly the worker thread wakes up
+    assert_recv_unordered!(helper, "gx"); // unfortunately the ordering of g & z is non-deterministic as it depends on how quickly the worker thread wakes up
 }
 
 #[test]
@@ -101,7 +115,7 @@ fn integration_2_threads_poll_preferred() {
 
     helper.pause(3000); // poll is preferred, comes before the higher priority h
     helper.wait_micros(10, 3, 'h');
-    helper.assert_recv_unordered("xy"); // unfortunately the ordering of x & y is non-deterministic as it depends on how quickly the worker thread wakes up
+    assert_recv_unordered!(helper, "xy"); // unfortunately the ordering of x & y is non-deterministic as it depends on how quickly the worker thread wakes up
     assert_recv!(helper, "h");
 }
 
@@ -189,37 +203,6 @@ impl TestHelper {
 
     fn pause(&self, micros: u64) {
         thread::sleep(Duration::from_micros(micros));
-    }
-
-    fn assert_recv(&self, expect: &str) {
-        let mut actual = String::default();
-        while expect.len() > actual.len() {
-            let c = self
-                .recv
-                .recv_timeout(Duration::from_millis(100))
-                .expect(&format!(
-                    "Timed out with only {:?}, expected {:?}",
-                    actual, expect
-                ));
-            actual.push(c);
-        }
-        assert_eq!(expect, actual);
-    }
-
-    fn assert_recv_unordered(&self, expect: &str) {
-        let expect: HashSet<_> = expect.chars().collect();
-        let mut actual = HashSet::default();
-        while expect.len() > actual.len() {
-            let c = self
-                .recv
-                .recv_timeout(Duration::from_millis(100))
-                .expect(&format!(
-                    "Timed out with only {:?}, expected {:?}",
-                    actual, expect
-                ));
-            actual.insert(c);
-        }
-        assert_eq!(expect, actual);
     }
 }
 

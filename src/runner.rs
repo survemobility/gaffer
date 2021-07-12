@@ -9,7 +9,10 @@ use std::{
 use crossbeam_channel::SendError;
 
 use crate::{
-    source::{util::may_be_taken::SkipIterator, RecurringJob, SourceManager},
+    source::{
+        util::{may_be_taken::SkipIterator, PriorityQueue},
+        RecurringJob, SourceManager,
+    },
     Job, Prioritised,
 };
 
@@ -27,13 +30,15 @@ where
     J: Job + UnwindSafe + 'static,
     <J as Prioritised>::Priority: Send,
 {
+    let queue = jobs.lock().unwrap().queue();
     let barrier = Arc::new(Barrier::new(thread_num));
     RunnerState::new(thread_num, concurrency_limit)
         .map(move |(recv, state)| {
             let jobs = jobs.clone();
+            let queue = queue.clone();
             let barrier = barrier.clone();
             thread::spawn(move || {
-                run(state, jobs, barrier, recv);
+                run(state, jobs, queue, barrier, recv);
             })
         })
         .collect()
@@ -43,6 +48,7 @@ where
 fn run<J: Job + UnwindSafe + 'static, R: RecurringJob<J>>(
     state: RunnerState<J>,
     jobs: Arc<Mutex<SourceManager<J, R>>>,
+    queue: Arc<Mutex<PriorityQueue<J>>>,
     ready_barrier: Arc<Barrier>,
     recv: crossbeam_channel::Receiver<J>,
 ) -> ! {
@@ -58,11 +64,13 @@ fn run<J: Job + UnwindSafe + 'static, R: RecurringJob<J>>(
     drop(recv);
     loop {
         let _ = panic::catch_unwind(|| job.execute()); // so a panicking job doesn't kill workers
-        job = match state.completed_job() {
+        let transition = state.completed_job(queue.lock().unwrap().drain());
+        job = match transition {
             PostJobTransition::BecomeAvailable(recv) => recv
                 .recv()
                 .expect("Available worker is not connected to shared runner state"),
             PostJobTransition::BecomeSupervisor => run_supervisor(&state, &jobs),
+            PostJobTransition::KeepWorking(job) => job,
         };
     }
 }
@@ -110,13 +118,34 @@ impl<J: Job> RunnerState<J> {
         })
     }
 
+    fn become_supervisor(&self) {
+        let mut workers = self.workers();
+        assert!(!workers.iter().any(|worker| worker.is_supervisor()));
+        workers[self.worker_index] = WorkerState::Supervisor;
+    }
+
     /// perform state transition after a job has been completed
     /// returns job receiver if this worker goes back to being available, or `None` if it becomes the supervisor
     ///
     /// Panics if worker was not either working or not started
-    fn completed_job(&self) -> PostJobTransition<J> {
+    fn completed_job(&self, mut jobs: impl SkipIterator<Item = J>) -> PostJobTransition<J> {
         let mut workers = self.workers();
         assert!(workers[self.worker_index].is_working());
+        let working_count = workers.iter().filter(|state| state.is_working()).count();
+        while let Some(job) = jobs.maybe_next() {
+            if let Some(max_concurrency) = (self.concurrency_limit)(job.priority()) {
+                if working_count as u8 >= max_concurrency {
+                    continue;
+                }
+            }
+            if workers
+                .iter()
+                .any(|worker| worker.exclusion() == Some(job.exclusion()))
+            {
+                continue;
+            }
+            return PostJobTransition::KeepWorking(job.into_inner());
+        }
         if workers.iter().any(|worker| worker.is_supervisor()) {
             let (send, recv) = crossbeam_channel::bounded(1);
             workers[self.worker_index] = WorkerState::Available(send);
@@ -125,12 +154,6 @@ impl<J: Job> RunnerState<J> {
             workers[self.worker_index] = WorkerState::Supervisor;
             PostJobTransition::BecomeSupervisor
         }
-    }
-
-    fn become_supervisor(&self) {
-        let mut workers = self.workers();
-        assert!(!workers.iter().any(|worker| worker.is_supervisor()));
-        workers[self.worker_index] = WorkerState::Supervisor;
     }
 
     /// assigns jobs to available workers, changing those workers into the `Working` state.
@@ -188,9 +211,11 @@ impl<J: Job> RunnerState<J> {
     }
 }
 
+#[derive(Debug)]
 enum PostJobTransition<J> {
     BecomeSupervisor,
     BecomeAvailable(crossbeam_channel::Receiver<J>),
+    KeepWorking(J),
 }
 
 #[derive(Debug)]
@@ -230,6 +255,7 @@ mod test {
 
     use super::*;
 
+    #[derive(Debug)]
     struct ExcludedJob(u8);
 
     impl Job for ExcludedJob {
@@ -279,7 +305,7 @@ mod test {
             worker_index: 0,
             concurrency_limit: Arc::new(|()| None),
         };
-        let job_recv = state.completed_job();
+        let job_recv = state.completed_job(PriorityQueue::new().drain());
         assert!(matches!(job_recv, PostJobTransition::BecomeAvailable(_)));
         let workers = state.workers.lock().unwrap();
         assert!(matches!(workers[0], WorkerState::Available(_)));
@@ -296,10 +322,74 @@ mod test {
             worker_index: 0,
             concurrency_limit: Arc::new(|()| None),
         };
-        let job_recv = state.completed_job();
+        let job_recv = state.completed_job(PriorityQueue::new().drain());
         assert!(matches!(job_recv, PostJobTransition::BecomeSupervisor));
         let workers = state.workers.lock().unwrap();
         assert!(workers[0].is_supervisor());
+    }
+
+    /// if a job completes and there is another job, this worker remains a worker
+    #[test]
+    fn working_to_working() {
+        let state = RunnerState::<ExcludedJob> {
+            workers: Arc::new(Mutex::new(vec![
+                WorkerState::Working(1),
+                WorkerState::Working(2),
+            ])),
+            worker_index: 0,
+            concurrency_limit: Arc::new(|()| None),
+        };
+        let mut queue = PriorityQueue::new();
+        queue.enqueue(ExcludedJob(3));
+        let job_recv = state.completed_job(queue.drain());
+        assert!(
+            matches!(job_recv, PostJobTransition::KeepWorking(ExcludedJob(3))),
+            "{:?}",
+            job_recv
+        );
+        let workers = state.workers.lock().unwrap();
+        assert!(workers[0].is_working());
+        assert!(queue.is_empty());
+    }
+
+    /// if a job completes and there is another job, but it is excluded, another job is not taken
+    #[test]
+    fn working_to_supervisor_excluded() {
+        let state = RunnerState::<ExcludedJob> {
+            workers: Arc::new(Mutex::new(vec![
+                WorkerState::Working(1),
+                WorkerState::Working(2),
+            ])),
+            worker_index: 0,
+            concurrency_limit: Arc::new(|()| None),
+        };
+        let mut queue = PriorityQueue::new();
+        queue.enqueue(ExcludedJob(1));
+        let job_recv = state.completed_job(queue.drain());
+        assert!(matches!(job_recv, PostJobTransition::BecomeSupervisor));
+        let workers = state.workers.lock().unwrap();
+        assert!(workers[0].is_supervisor());
+        assert!(!queue.is_empty());
+    }
+
+    /// if a job completes and there is another job, but it is throttled to , another job is not taken
+    #[test]
+    fn working_to_supervisor_throttled() {
+        let state = RunnerState::<PrioritisedJob> {
+            workers: Arc::new(Mutex::new(vec![
+                WorkerState::Working(NoExclusion),
+                WorkerState::Working(NoExclusion),
+            ])),
+            worker_index: 0,
+            concurrency_limit: Arc::new(|num| Some(num)),
+        };
+        let mut queue = PriorityQueue::new();
+        queue.enqueue(PrioritisedJob(1));
+        let job_recv = state.completed_job(queue.drain());
+        assert!(matches!(job_recv, PostJobTransition::BecomeSupervisor));
+        let workers = state.workers.lock().unwrap();
+        assert!(workers[0].is_supervisor());
+        assert!(!queue.is_empty());
     }
 
     /// when a job is assigned the state is switched to working and the job is sent over the channel

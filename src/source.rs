@@ -1,12 +1,13 @@
 use std::{
     fmt,
     iter::Iterator,
+    sync::{Arc, Mutex, MutexGuard},
     time::{Duration, Instant},
 };
 
 use crate::Prioritised;
 
-use self::util::{prioritized_mpsc, Drain};
+use self::util::{prioritized_mpsc, Drain, PriorityQueue};
 
 pub(crate) mod util;
 
@@ -67,7 +68,7 @@ impl<J: Prioritised + Send + 'static, R: RecurringJob<J>> SourceManager<J, R> {
     /// Maximum wait duration would be the longest interval of all of the recurring jobs, or an arbitrary timeout. It could return immediately. It could return with no jobs. The caller should only iterate as many jobs as it can execute, the iterator should be dropped without iterating the rest.
     ///
     /// wait_for_new: if set, only returns immedaitely if there are new jobs inthe queue
-    pub fn get(&mut self, wait_for_new: bool) -> Drain<'_, J> {
+    pub fn get(&mut self, wait_for_new: bool) -> Drain<J, MutexGuard<PriorityQueue<J>>> {
         let timeout = self.queue_timeout();
         let recurring = &mut self.recurring;
         if timeout == Duration::ZERO {
@@ -107,6 +108,10 @@ impl<J: Prioritised + Send + 'static, R: RecurringJob<J>> SourceManager<J, R> {
     /// The soonest instant when a recurring job would need to be created
     fn soonest_recurring(&self) -> Option<Instant> {
         self.recurring.iter().map(R::max_sleep).min()
+    }
+
+    pub fn queue(&self) -> Arc<Mutex<PriorityQueue<J>>> {
+        self.queue.queue()
     }
 }
 
@@ -255,15 +260,23 @@ mod test {
     #[test]
     fn queued_resets_recurring() {
         let (send, mut manager) = SourceManager::new();
-        let half_interval_ago = Instant::now() - Duration::from_micros(1000);
+        let start = Instant::now();
+        let half_interval_ago = start - Duration::from_micros(1000);
         manager.set_recurring(Duration::from_millis(2), half_interval_ago, Tester(1));
         manager.set_recurring(Duration::from_millis(2), half_interval_ago, Tester(2));
         manager.set_recurring(Duration::from_millis(2), half_interval_ago, Tester(3));
         send.send(Tester(2)).unwrap();
-        assert_eq!(manager.get(false).collect::<Vec<_>>(), vec![Tester(2)]);
         assert_eq!(
             manager.get(false).collect::<Vec<_>>(),
-            vec![Tester(3), Tester(1)]
+            vec![Tester(2)],
+            "Wrong result after {:?}",
+            Instant::now().duration_since(start)
+        );
+        assert_eq!(
+            manager.get(false).collect::<Vec<_>>(),
+            vec![Tester(3), Tester(1)],
+            "Wrong result after {:?}",
+            Instant::now().duration_since(start)
         );
         assert_eq!(manager.get(false).collect::<Vec<_>>(), vec![Tester(2)]);
     }
@@ -273,13 +286,14 @@ mod test {
         let (send, mut manager) = SourceManager::new();
         let now = Instant::now();
         manager.set_recurring(Duration::from_millis(1), now, Tester(1));
-        manager.set_recurring(Duration::from_millis(1), now, Tester(2));
         manager.set_recurring(Duration::from_millis(1), now, Tester(3));
-        thread::spawn(move || {
-            thread::sleep(Duration::from_micros(10));
-            send.send(Tester(2)).unwrap()
-        });
-        assert_eq!(manager.get(false).collect::<Vec<_>>(), vec![Tester(2)]);
+        send.send(Tester(2)).unwrap();
+        assert_eq!(
+            manager.get(false).collect::<Vec<_>>(),
+            vec![Tester(2)],
+            "Wrong result after {:?}",
+            Instant::now().duration_since(now)
+        );
     }
 
     #[test]

@@ -2,14 +2,21 @@ use std::{
     cmp::Reverse,
     collections::{BTreeMap, VecDeque},
     fmt,
+    ops::DerefMut,
 };
 
 use crate::{MergeResult, Prioritised};
 
 use self::may_be_taken::SkipIterator;
 
-pub(crate) struct PriorityQueue<T: Prioritised> {
+pub struct PriorityQueue<T: Prioritised> {
     map: BTreeMap<Reverse<T::Priority>, VecDeque<T>>,
+}
+
+impl<T: Prioritised> Default for PriorityQueue<T> {
+    fn default() -> Self {
+        PriorityQueue::new()
+    }
 }
 
 impl<T: Prioritised> PriorityQueue<T> {
@@ -72,9 +79,15 @@ impl<T: Prioritised> PriorityQueue<T> {
     }
 
     /// drains each element iterated, once the iterator is dropped, *unlike `drain` implementations in the standard library, any remaining items are left in the queue
-    pub fn drain(&mut self) -> Drain<'_, T> {
+    pub fn drain(&mut self) -> Drain<T, &mut Self> {
+        Self::drain_deref(self)
+    }
+
+    /// drains each element iterated, once the iterator is dropped, *unlike `drain` implementations in the standard library, any remaining items are left in the queue
+    /// This version allows different receiver types, so it can be called on eg `MutexGuard<Self>` and then take ownership of the guard
+    pub fn drain_deref<Q: DerefMut<Target = Self>>(this: Q) -> Drain<T, Q> {
         Drain {
-            queue: self,
+            queue: this,
             skip: 0,
         }
     }
@@ -104,12 +117,12 @@ where
     }
 }
 
-pub struct Drain<'q, T: Prioritised> {
-    queue: &'q mut PriorityQueue<T>,
+pub struct Drain<T: Prioritised, Q: DerefMut<Target = PriorityQueue<T>>> {
+    queue: Q,
     skip: usize,
 }
 
-impl<'q, T: Prioritised> Iterator for Drain<'q, T> {
+impl<T: Prioritised, Q: DerefMut<Target = PriorityQueue<T>>> Iterator for Drain<T, Q> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -117,7 +130,7 @@ impl<'q, T: Prioritised> Iterator for Drain<'q, T> {
     }
 }
 
-impl<'q, T: Prioritised> SkipIterator for Drain<'q, T> {
+impl<T: Prioritised, Q: DerefMut<Target = PriorityQueue<T>>> SkipIterator for Drain<T, Q> {
     type Item = T;
 
     fn has_next(&self) -> bool {
@@ -231,10 +244,7 @@ pub(crate) mod may_be_taken {
     #[test]
     fn test() {
         let mut v = vec![1, 2, 3, 4];
-        let mut iter = VecSkipIter {
-            vec: &mut v,
-            skip: 0,
-        };
+        let mut iter = VecSkipIter::new(&mut v);
         let next = iter.maybe_next().unwrap();
         assert_eq!(*next, 1);
         assert_eq!(next.into_inner(), 1);
@@ -354,14 +364,19 @@ mod test {
 }
 
 pub(crate) mod prioritized_mpsc {
-    use std::{fmt, thread, time::Duration};
+    use std::{
+        fmt,
+        sync::{Arc, Mutex, MutexGuard},
+        thread,
+        time::Duration,
+    };
 
     use crate::Prioritised;
 
     use super::PriorityQueue;
 
     pub struct Receiver<T: Prioritised> {
-        queue: PriorityQueue<T>,
+        queue: Arc<Mutex<PriorityQueue<T>>>,
         recv: crossbeam_channel::Receiver<T>,
     }
 
@@ -379,9 +394,10 @@ pub(crate) mod prioritized_mpsc {
         /// Processes things currently ready in the queue without blocking
         pub fn process_queue_ready(&mut self, mut cb: impl FnMut(&T)) -> bool {
             let mut has_new = false;
+            let mut queue = self.queue.lock().unwrap();
             for item in self.recv.try_iter() {
                 cb(&item);
-                self.queue.enqueue(item);
+                queue.enqueue(item);
                 has_new = true;
             }
             has_new
@@ -395,11 +411,11 @@ pub(crate) mod prioritized_mpsc {
             mut cb: impl FnMut(&T),
         ) {
             let has_new = self.process_queue_ready(&mut cb);
-            if !has_new && (wait_for_new || self.queue.is_empty()) {
+            if !has_new && (wait_for_new || self.queue.lock().unwrap().is_empty()) {
                 match self.recv.recv_timeout(timeout) {
                     Ok(item) => {
                         cb(&item);
-                        self.queue.enqueue(item);
+                        self.queue.lock().unwrap().enqueue(item);
                     }
                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
                     Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
@@ -410,42 +426,18 @@ pub(crate) mod prioritized_mpsc {
         }
 
         /// iterator over the currently available messages in priority order, any items not iterated when the iterator is dropped are left
-        pub fn drain(&mut self) -> super::Drain<T> {
-            self.queue.drain()
+        pub fn drain(&mut self) -> super::Drain<T, MutexGuard<PriorityQueue<T>>> {
+            PriorityQueue::drain_deref(self.queue.lock().unwrap())
         }
 
         pub fn enqueue(&mut self, item: T) {
-            self.queue.enqueue(item);
+            self.queue.lock().unwrap().enqueue(item);
+        }
+
+        pub fn queue(&self) -> Arc<Mutex<PriorityQueue<T>>> {
+            self.queue.clone()
         }
     }
-
-    // struct ProcessQueueIter<'q, T: Prioritised + 'q> {
-    //     inner: &'q mut Receiver<T>,
-    //     wait_for_new: bool,
-    //     timeout: Duration,
-    // }
-
-    // impl<'q, T: Prioritised + 'q> Iterator for ProcessQueueIter<'q, T> {
-    //     type Item = &'q T;
-
-    //     fn next(&mut self) -> Option<Self::Item> {
-    //         if let Ok(item) = self.inner.recv.try_recv() {
-    //             self.wait_for_new = false;
-    //             self.inner.queue.enqueue(item)
-    //         } else if self.wait_for_new {
-    //             match self.inner.recv.recv_timeout(self.timeout) {
-    //                 Ok(message) => Some(self.inner.queue.enqueue(message)),
-    //                 Err(RecvTimeoutError::Timeout) => None,
-    //                 Err(RecvTimeoutError::Disconnected) => {
-    //                     thread::sleep(self.timeout);
-    //                     None
-    //                 },
-    //             }
-    //         } else {
-    //             None
-    //         }
-    //     }
-    // }
 
     /// Produces an mpsc channel where, in the event that multiple jobs are already ready, they are produced in priority order
     pub fn channel<T: Prioritised>() -> (crossbeam_channel::Sender<T>, Receiver<T>) {
@@ -453,7 +445,7 @@ pub(crate) mod prioritized_mpsc {
         (
             send,
             Receiver {
-                queue: PriorityQueue::new(),
+                queue: Arc::new(Mutex::new(PriorityQueue::new())),
                 recv,
             },
         )
@@ -489,15 +481,10 @@ pub(crate) mod prioritized_mpsc {
         #[test]
         fn returns_immediately() {
             let (send, mut recv) = channel::<Tester>();
-            thread::spawn(move || {
-                send.send(Tester(0)).unwrap();
-            });
+            send.send(Tester(0)).unwrap();
             let instant = Instant::now();
             recv.process_queue_timeout(Duration::from_millis(1), false, |_| {});
-            assert_eq!(
-                recv.drain().next().unwrap(),
-                Tester(0)
-            );
+            assert_eq!(recv.drain().next().unwrap(), Tester(0));
             assert!(Instant::now().duration_since(instant) < Duration::from_millis(1));
         }
 
