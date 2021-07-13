@@ -423,7 +423,7 @@ pub(crate) mod prioritized_mpsc {
         }
 
         /// iterator over the currently available messages in priority order, any items not iterated when the iterator is dropped are left
-        pub fn drain(&mut self) -> super::Drain<T, MutexGuard<PriorityQueue<T>>> {
+        pub fn drain(&mut self) -> super::Drain<T, MutexGuard<'_, PriorityQueue<T>>> {
             PriorityQueue::drain_deref(self.queue.lock())
         }
 

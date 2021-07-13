@@ -4,8 +4,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chief::*;
 use crossbeam_channel::Sender;
+use gaffer::*;
 
 const TIMEOUT: Duration = Duration::from_millis(100);
 
@@ -132,7 +132,7 @@ fn panic_in_job() {
             }
         }
     }
-    let runner: JobRunner<_, source::NeverRecur> = JobRunner::builder().build(1);
+    let runner = JobRunner::builder().build(1);
     runner.send(PanicJob(None)).unwrap();
     runner.send(PanicJob(Some(send))).unwrap();
     assert!(recv.recv_timeout(Duration::from_millis(500)).is_ok());
@@ -148,22 +148,20 @@ impl TestHelper {
     fn new(thread_num: usize, interval: Duration, recurring: &str) -> Self {
         let (send, recv) = crossbeam_channel::unbounded();
 
-        let mut runner = JobRunner::builder();
-        for key in recurring.chars() {
-            runner.set_recurring(
+        let runner = JobRunner::builder()
+            .set_recurring(
                 interval,
                 Instant::now(),
-                WaitJob {
+                recurring.chars().map(|key| WaitJob {
                     created: Instant::now(),
                     duration: Duration::from_micros(40),
                     priority: 2,
                     exclusion: None,
                     key,
                     send: send.clone(),
-                },
-            );
-        }
-        let runner = runner.build(thread_num);
+                }),
+            )
+            .build(thread_num);
         Self { runner, send, recv }
     }
 

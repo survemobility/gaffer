@@ -1,3 +1,5 @@
+//! Handles job sources
+
 use parking_lot::{Mutex, MutexGuard};
 use std::{
     fmt,
@@ -18,9 +20,10 @@ pub struct SourceManager<J: Prioritised, R = IntervalRecurringJob<J>> {
     recurring: Vec<R>,
 }
 
+#[cfg(test)]
 impl<J: Prioritised + Send + Clone + 'static> SourceManager<J, IntervalRecurringJob<J>> {
     /// Set a job as recurring, the job will be enqueued every time `interval` passes since the last enqueue of a matching job
-    pub fn set_recurring(&mut self, interval: Duration, last_enqueue: Instant, job: J) {
+    fn set_recurring(&mut self, interval: Duration, last_enqueue: Instant, job: J) {
         self.recurring.push(IntervalRecurringJob {
             last_enqueue,
             interval,
@@ -40,6 +43,8 @@ where
 }
 
 impl<J: Prioritised + Send + 'static, R: RecurringJob<J>> SourceManager<J, R> {
+    #[cfg(test)]
+    /// Create a new `(Sender, SourceManager<>)` pair
     pub fn new() -> (crossbeam_channel::Sender<J>, SourceManager<J, R>) {
         let (send, recv) = prioritized_mpsc::channel();
         (
@@ -51,6 +56,7 @@ impl<J: Prioritised + Send + 'static, R: RecurringJob<J>> SourceManager<J, R> {
         )
     }
 
+    /// Create a new `(Sender, SourceManager<>)` pair with the provided recurring jobs
     pub fn new_with_recurring(
         recurring: Vec<R>,
     ) -> (crossbeam_channel::Sender<J>, SourceManager<J, R>) {
@@ -69,7 +75,7 @@ impl<J: Prioritised + Send + 'static, R: RecurringJob<J>> SourceManager<J, R> {
     /// Maximum wait duration would be the longest interval of all of the recurring jobs, or an arbitrary timeout. It could return immediately. It could return with no jobs. The caller should only iterate as many jobs as it can execute, the iterator should be dropped without iterating the rest.
     ///
     /// wait_for_new: if set, only returns immedaitely if there are new jobs inthe queue
-    pub fn get(&mut self, wait_for_new: bool) -> Drain<J, MutexGuard<PriorityQueue<J>>> {
+    pub fn get(&mut self, wait_for_new: bool) -> Drain<J, MutexGuard<'_, PriorityQueue<J>>> {
         let timeout = self.queue_timeout();
         let recurring = &mut self.recurring;
         if timeout == Duration::ZERO {
@@ -111,17 +117,23 @@ impl<J: Prioritised + Send + 'static, R: RecurringJob<J>> SourceManager<J, R> {
         self.recurring.iter().map(R::max_sleep).min()
     }
 
+    /// Gets access to the priority queue that this source uses, be careful with this `Mutex` as `get()` will also lock it.
     pub fn queue(&self) -> Arc<Mutex<PriorityQueue<J>>> {
         self.queue.queue()
     }
 }
 
+/// Defines how a job recurs
 pub trait RecurringJob<J> {
+    /// Get the job if it is ready to recur
     fn get(&self) -> Option<J>;
+    /// Notifies the recurring job about any job that has ben enqueued so that it can push back it's next occurance
     fn job_enqueued(&mut self, job: &J);
+    /// Returns the latest `Instant` that the caller could sleep until before it should call `get()` again
     fn max_sleep(&self) -> Instant;
 }
 
+/// Recurring job which works by updating the last time a job was enqueued reenqueueing after some interval
 pub struct IntervalRecurringJob<J> {
     pub(crate) last_enqueue: Instant,
     pub(crate) interval: Duration,
@@ -148,6 +160,7 @@ impl<J: Prioritised + Clone> RecurringJob<J> for IntervalRecurringJob<J> {
     }
 }
 
+/// Just until the never type is stable, this represents that the job does not recur
 pub enum NeverRecur {}
 
 impl<J> RecurringJob<J> for NeverRecur {

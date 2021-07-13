@@ -39,7 +39,7 @@ where
             let queue = queue.clone();
             let barrier = barrier.clone();
             thread::Builder::new()
-                .name(format!("chief#{}", state.worker_index))
+                .name(format!("gaffer#{}", state.worker_index))
                 .spawn(move || {
                     run(state, jobs, queue, barrier, recv);
                 })
@@ -235,7 +235,7 @@ impl<J: Job> RunnerState<J> {
         None
     }
 
-    fn workers(&self) -> MutexGuard<Vec<WorkerState<J>>> {
+    fn workers(&self) -> MutexGuard<'_, Vec<WorkerState<J>>> {
         self.workers.lock()
     }
 }

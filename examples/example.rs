@@ -12,10 +12,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chief::{ExclusionOption, Job, JobRunner, MergeResult, Prioritised};
+use gaffer::{Builder, ExclusionOption, Job, MergeResult, Prioritised};
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let mut runner = JobRunner::builder().limit_concurrency(|_prioirty| Some(1));
+    let mut runner = Builder::new().limit_concurrency(|_priority| Some(1));
     let file = fs::File::open("examples/poll")?;
     let r = BufReader::new(file);
     for line in r.lines().take_while(Result::is_ok).flat_map(Result::ok) {
@@ -25,7 +25,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let interval = Duration::from_secs(interval.parse()?);
         let job: WaitJob = job.parse()?;
         println!("Recurring every {:?} : {:?}", interval, job);
-        runner.set_recurring(interval, Instant::now(), job);
+        runner = runner.set_recurring(interval, Instant::now(), job);
     }
 
     let runner = runner.build(2);

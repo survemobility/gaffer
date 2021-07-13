@@ -1,3 +1,17 @@
+//! Promises which can be used by a job to complete a future from another thread. Promises can also be merged, a merged promise completes all the merged futures at the same time.
+//!
+//! # Example
+//!
+//! ```
+//! use gaffer::future::Promise;
+//! let (mut promise1, future1) = Promise::new();
+//! let (promise2, future2) = Promise::new();
+//! promise1.merge(promise2);
+//! std::thread::spawn(move || promise1.fulfill("hello"));
+//! assert_eq!(futures::executor::block_on(future2), Ok("hello"));
+//! assert_eq!(futures::executor::block_on(future1), Ok("hello"));
+//! ```
+
 use parking_lot::{Mutex, MutexGuard};
 use std::{
     future::Future,
@@ -13,7 +27,7 @@ pub struct Promise<T> {
     shared: Arc<PromiseShared<T>>,
 }
 
-/// The receiving side of a promise which will be fulfilled by another thread. Unlike a regular `Future` if this is dropped the computation will continue. If the other end is dropped, this will complete with `Err(PromiseDropped)`
+/// The receiving side of a promise which will be fulfilled by another thread. Unlike a regular [`std::future::Future`] if this is dropped the computation will continue. If the other end is dropped, this will complete with `Err(PromiseDropped)`
 pub struct PromiseFuture<T> {
     shared: Arc<PromiseShared<T>>,
 }
@@ -33,7 +47,7 @@ impl<T> Default for PromiseShared<T> {
 }
 
 impl<T> PromiseShared<T> {
-    fn inner(&self) -> MutexGuard<PromiseInner<T>> {
+    fn inner(&self) -> MutexGuard<'_, PromiseInner<T>> {
         self.inner.lock()
     }
 }
@@ -84,6 +98,7 @@ impl<T: Clone> Promise<T> {
         )
     }
 
+    /// Fulfill the promise, the future will be woken and can retrieve the result
     pub fn fulfill(self, result: T) {
         let mut data = self.shared.inner();
         if let Some(merged) = data.merged.take() {
@@ -92,6 +107,7 @@ impl<T: Clone> Promise<T> {
         data.result.replace(result);
     }
 
+    /// Merge another promise of the same type into this promise, the future paired with the other promise will be linked to this and will be completed when this one is fulfilled or dropped.
     pub fn merge(&mut self, other: Self) {
         let mut data = self.shared.inner();
         if let Some(merged) = &mut data.merged {

@@ -1,4 +1,4 @@
-# chief
+# gaffer
 
 Prioritised, parallel job scheduler with concurrent exclusion, job merging, recurring jobs and load limiting for lower priorities.
 
@@ -23,5 +23,5 @@ __Limitations__
 
 ```toml
 [dependencies]
-chief = { git = "ssh://git@github.com/survemobility/chief.git", branch = "pr-1" }
+gaffer = { git = "ssh://git@github.com/survemobility/gaffer.git", branch = "pr-1" }
 ```

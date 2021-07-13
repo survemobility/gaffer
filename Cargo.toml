@@ -1,5 +1,5 @@
 [package]
-name = "chief"
+name = "gaffer"
 version = "0.0.1"
 authors = ["Mike Bush <mike@survemobility.com>"]
 edition = "2018"
