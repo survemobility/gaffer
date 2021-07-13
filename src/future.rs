@@ -15,6 +15,7 @@
 use parking_lot::{Mutex, MutexGuard};
 use std::{
     future::Future,
+    panic::{AssertUnwindSafe, RefUnwindSafe},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -33,14 +34,14 @@ pub struct PromiseFuture<T> {
 }
 
 struct PromiseShared<T> {
-    inner: Mutex<PromiseInner<T>>,
+    inner: AssertUnwindSafe<Mutex<PromiseInner<T>>>,
     promise_dropped: AtomicBool,
 }
 
 impl<T> Default for PromiseShared<T> {
     fn default() -> Self {
         Self {
-            inner: Default::default(),
+            inner: AssertUnwindSafe(Default::default()),
             promise_dropped: Default::default(),
         }
     }
@@ -86,7 +87,7 @@ impl<T> Drop for Promise<T> {
     }
 }
 
-impl<T: Clone> Promise<T> {
+impl<T: Clone + RefUnwindSafe> Promise<T> {
     /// Create the sending and receiving parts of the promise.
     pub fn new() -> (Promise<T>, PromiseFuture<T>) {
         let shared = Default::default();

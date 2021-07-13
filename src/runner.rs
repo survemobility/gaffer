@@ -2,7 +2,6 @@ use parking_lot::{Mutex, MutexGuard};
 use std::{
     fmt::Debug,
     iter,
-    panic::{self, UnwindSafe},
     sync::{Arc, Barrier},
     thread::{self, JoinHandle},
 };
@@ -28,7 +27,7 @@ pub fn spawn<J, R: RecurringJob<J> + Send + 'static>(
     concurrency_limit: Box<ConcurrencyLimitFn<J>>,
 ) -> Vec<JoinHandle<()>>
 where
-    J: Job + UnwindSafe + 'static,
+    J: Job + 'static,
     <J as Prioritised>::Priority: Send,
 {
     let queue = jobs.lock().queue();
@@ -41,57 +40,112 @@ where
             thread::Builder::new()
                 .name(format!("gaffer#{}", state.worker_index))
                 .spawn(move || {
-                    run(state, jobs, queue, barrier, recv);
+                    Runner::new(state, jobs, queue).run(barrier, recv);
                 })
                 .unwrap()
         })
         .collect()
 }
 
-/// Run the runner loop, `ready_barrier` syncronizes with the start of the other runners and decides the initial supervisor
-fn run<J: Job + UnwindSafe + 'static, R: RecurringJob<J>>(
+struct Runner<J: Job + 'static, R: RecurringJob<J> + Send + 'static> {
     state: RunnerState<J>,
     jobs: Arc<Mutex<SourceManager<J, R>>>,
     queue: Arc<Mutex<PriorityQueue<J>>>,
-    ready_barrier: Arc<Barrier>,
-    recv: crossbeam_channel::Receiver<J>,
-) -> ! {
-    let mut job = if ready_barrier.wait().is_leader() {
-        // become the supervisor
-        state.become_supervisor();
-        run_supervisor(&state, &jobs)
-    } else {
-        // worker is available
-        recv.recv()
-            .expect("Available worker is not connected to shared runner state")
-    };
-    drop(recv);
-    loop {
-        let _ = panic::catch_unwind(|| job.execute()); // so a panicking job doesn't kill workers
-        let transition = state.completed_job(queue.lock().drain());
-        job = match transition {
+}
+
+impl<J, R> Runner<J, R>
+where
+    J: Job + 'static,
+    R: RecurringJob<J> + Send,
+{
+    fn new(
+        state: RunnerState<J>,
+        jobs: Arc<Mutex<SourceManager<J, R>>>,
+        queue: Arc<Mutex<PriorityQueue<J>>>,
+    ) -> Self {
+        Self { state, jobs, queue }
+    }
+
+    /// Run the runner loop, `ready_barrier` syncronizes with the start of the other runners and decides the initial supervisor
+    fn run(self, ready_barrier: Arc<Barrier>, recv: crossbeam_channel::Receiver<J>) -> ! {
+        let job = if ready_barrier.wait().is_leader() {
+            // become the supervisor
+            self.state.become_supervisor();
+            self.run_supervisor()
+        } else {
+            // worker is available
+            recv.recv()
+                .expect("Available worker is not connected to shared runner state")
+        };
+        drop(recv);
+        self.run_worker(job);
+    }
+
+    fn run_worker(self, mut job: J) -> ! {
+        loop {
+            job.execute(); // so a panicking job doesn't kill workers
+            job = self.next_job();
+        }
+    }
+
+    fn next_job(&self) -> J {
+        let transition = self.state.completed_job(self.queue.lock().drain());
+        match transition {
             PostJobTransition::BecomeAvailable(recv) => recv
                 .recv()
                 .expect("Available worker is not connected to shared runner state"),
-            PostJobTransition::BecomeSupervisor => run_supervisor(&state, &jobs),
+            PostJobTransition::BecomeSupervisor => self.run_supervisor(),
             PostJobTransition::KeepWorking(job) => job,
-        };
+        }
+    }
+
+    /// Run the supervisor loop, jobs are retrieved and assigned. Returns when the supervisor has a job to execute and it becomes a worker
+    fn run_supervisor(&self) -> J {
+        let mut wait_for_new = false;
+        let mut jobs = self.jobs.lock();
+        loop {
+            if let Some(job) = self.state.assign_jobs(jobs.get(wait_for_new)) {
+                // become a worker
+                return job;
+            }
+            wait_for_new = true;
+        }
+    }
+
+    /// Entry point for a new thread, replacing one which panicked whilst executing a job
+    fn panic_recover(self) -> ! {
+        let job = self.next_job();
+        self.run_worker(job);
     }
 }
 
-/// Run the supervisor loop, jobs are retrieved and assigned. Returns when the supervisor has a job to execute and it becomes a worker
-fn run_supervisor<J: Job + 'static, R: RecurringJob<J>>(
-    state: &RunnerState<J>,
-    jobs: &Arc<Mutex<SourceManager<J, R>>>,
-) -> J {
-    let mut wait_for_new = false;
-    let mut jobs = jobs.lock();
-    loop {
-        if let Some(job) = state.assign_jobs(jobs.get(wait_for_new)) {
-            // become a worker
-            return job;
+impl<J: Job + 'static, R: RecurringJob<J> + Send + 'static> Drop for Runner<J, R> {
+    fn drop(&mut self) {
+        if thread::panicking() {
+            // spawn another thread to take over
+            let Runner {
+                state:
+                    RunnerState {
+                        workers,
+                        worker_index,
+                        concurrency_limit,
+                    },
+                jobs,
+                queue,
+            } = self;
+            let state = RunnerState {
+                workers: workers.clone(),
+                worker_index: *worker_index,
+                concurrency_limit: concurrency_limit.clone(),
+            };
+            let runner = Runner::new(state, jobs.clone(), queue.clone());
+            thread::Builder::new()
+                .name(format!("gaffer#{}", worker_index))
+                .spawn(move || {
+                    runner.panic_recover();
+                })
+                .unwrap();
         }
-        wait_for_new = true;
     }
 }
 

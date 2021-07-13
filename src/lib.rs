@@ -86,7 +86,6 @@ use parking_lot::Mutex;
 
 use std::{
     fmt,
-    panic::UnwindSafe,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -183,7 +182,7 @@ impl<J: Job + Send + Clone + 'static> Default for Builder<J, source::IntervalRec
     }
 }
 
-impl<J: Job + UnwindSafe + 'static, R: RecurringJob<J> + Send + 'static> Builder<J, R> {
+impl<J: Job + 'static, R: RecurringJob<J> + Send + 'static> Builder<J, R> {
     /// Function determining, for each priority, how many threads can be allocated to jobs of this priority, any remaining threads will be left idle to service higher-priority jobs. `None` means parallelism won't be limited
     pub fn limit_concurrency(
         mut self,
