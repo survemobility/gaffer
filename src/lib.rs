@@ -133,29 +133,6 @@ pub struct Builder<J: Job + 'static, R> {
     recurring: Vec<R>,
 }
 
-impl<J: Job + Send + Clone + 'static> Builder<J, NeverRecur> {
-    /// Set jobs as recurring, the job will be executed every time `interval` passes since the last execution of a matching job
-    pub fn set_recurring(
-        self,
-        interval: Duration,
-        last_enqueue: Instant,
-        jobs: impl IntoIterator<Item = J>,
-    ) -> Builder<J, IntervalRecurringJob<J>> {
-        let mut builder = Builder {
-            concurrency_limit: self.concurrency_limit,
-            recurring: vec![],
-        };
-        for job in jobs {
-            builder.recurring.push(IntervalRecurringJob {
-                last_enqueue,
-                interval,
-                job,
-            });
-        }
-        builder
-    }
-}
-
 impl<J: Job + Send + Clone + 'static> Builder<J, IntervalRecurringJob<J>> {
     /// Start building a [`JobRunner`]
     pub fn new() -> Self {

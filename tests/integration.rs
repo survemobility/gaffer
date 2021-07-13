@@ -148,20 +148,22 @@ impl TestHelper {
     fn new(thread_num: usize, interval: Duration, recurring: &str) -> Self {
         let (send, recv) = crossbeam_channel::unbounded();
 
-        let runner = JobRunner::builder()
-            .set_recurring(
+        let mut builder = gaffer::Builder::new();
+        for key in recurring.chars() {
+            builder = builder.set_recurring(
                 interval,
                 Instant::now(),
-                recurring.chars().map(|key| WaitJob {
+                WaitJob {
                     created: Instant::now(),
                     duration: Duration::from_micros(40),
                     priority: 2,
                     exclusion: None,
                     key,
                     send: send.clone(),
-                }),
+                },
             )
-            .build(thread_num);
+        }
+        let runner = builder.build(thread_num);
         Self { runner, send, recv }
     }
 
