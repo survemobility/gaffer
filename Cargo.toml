@@ -1,5 +1,9 @@
 [package]
 name = "gaffer"
+description = "Prioritised, parallel job scheduler with concurrent exclusion, job merging, recurring jobs and load limiting for lower priorities."
+repository = "https://github.com/survemobility/gaffer/"
+keywords = ["job", "scheduler", "priority"]
+categories = ["concurrency"]
 version = "0.0.1"
 authors = ["Mike Bush <mike@survemobility.com>"]
 edition = "2018"
