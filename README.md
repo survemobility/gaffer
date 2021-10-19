@@ -21,9 +21,17 @@ __Limitations__
 
 ## Usage
 
+With `cargo-edit`:
+
+```sh
+cargo add gaffer
+```
+
+or in `Cargo.toml`
+
 ```toml
 [dependencies]
-gaffer = { git = "ssh://git@github.com/survemobility/gaffer.git", branch = "pr-1" }
+gaffer = "0.1"
 ```
 
 ## License

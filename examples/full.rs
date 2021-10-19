@@ -1,8 +1,8 @@
-///! Example of job scheduler usage.
-///!
-///! * Jobs block a thread for a pre-defined period of time
-///! * Jobs can be added the the queue from `stdin`, one per line `{seconds} [priority] [exclusion]`, ie' `3 5 q`, the later entries can be left out
-///! * If it exists, a file `examples/poll` will be read every 10 seconds and jobs created based on the same format (notice that if there are more jobs than threads, the low priority jobs never get scheduled) the jobs should be prioritised with highest first
+//! Example of job scheduler usage.
+//!
+//! * Jobs block a thread for a pre-defined period of time
+//! * Jobs can be added the the queue from `stdin`, one per line `{seconds} [priority] [exclusion]`, ie' `3 5 q`, the later entries can be left out
+//! * If it exists, a file `examples/poll` will be read every 10 seconds and jobs created based on the same format (notice that if there are more jobs than threads, the low priority jobs never get scheduled) the jobs should be prioritised with highest first
 use std::{
     error::Error,
     fs,

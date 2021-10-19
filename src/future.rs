@@ -4,10 +4,12 @@
 //!
 //! ```
 //! use gaffer::future::Promise;
+//!
 //! let (mut promise1, future1) = Promise::new();
 //! let (promise2, future2) = Promise::new();
 //! promise1.merge(promise2);
 //! std::thread::spawn(move || promise1.fulfill("hello"));
+//!
 //! assert_eq!(futures::executor::block_on(future2), Ok("hello"));
 //! assert_eq!(futures::executor::block_on(future1), Ok("hello"));
 //! ```
@@ -74,6 +76,14 @@ unsafe impl<T: Send> Sync for PromiseInner<T> {}
 /// The promise was dropped and so a result will never be provided
 #[derive(Debug, PartialEq, Eq)]
 pub struct PromiseDropped;
+
+impl std::error::Error for PromiseDropped {}
+
+impl std::fmt::Display for PromiseDropped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("The promise was dropped without being fulfilled")
+    }
+}
 
 impl<T> Drop for Promise<T> {
     fn drop(&mut self) {
