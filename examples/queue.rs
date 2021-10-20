@@ -1,7 +1,7 @@
 //! Example of sending jobs via queue
 //!
 //! Schedules some jobs which wait for 1 second
-use gaffer::{Builder, Job, MergeResult, NoExclusion, Prioritised};
+use gaffer::{Builder, Job, NoExclusion, Prioritised};
 use std::time::Duration;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -37,8 +37,6 @@ impl Prioritised for WaitJob {
     type Priority = ();
 
     fn priority(&self) -> Self::Priority {}
-
-    const ATTEMPT_MERGE_INTO: Option<fn(Self, &mut Self) -> MergeResult<Self>> = None;
 
     fn matches(&self, _job: &Self) -> bool {
         false

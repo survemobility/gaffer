@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::Prioritised;
+use crate::{MergeResult, Prioritised};
 
 use self::util::{prioritized_mpsc, Drain, PriorityQueue};
 
@@ -46,7 +46,7 @@ impl<J: Prioritised + Send + 'static, R: RecurringJob<J>> SourceManager<J, R> {
     #[cfg(test)]
     /// Create a new `(Sender, SourceManager<>)` pair
     pub fn new() -> (crossbeam_channel::Sender<J>, SourceManager<J, R>) {
-        let (send, recv) = prioritized_mpsc::channel();
+        let (send, recv) = prioritized_mpsc::channel(None);
         (
             send,
             SourceManager {
@@ -59,8 +59,9 @@ impl<J: Prioritised + Send + 'static, R: RecurringJob<J>> SourceManager<J, R> {
     /// Create a new `(Sender, SourceManager<>)` pair with the provided recurring jobs
     pub fn new_with_recurring(
         recurring: Vec<R>,
+        merge_fn: Option<fn(J, &mut J) -> MergeResult<J>>,
     ) -> (crossbeam_channel::Sender<J>, SourceManager<J, R>) {
-        let (send, recv) = prioritized_mpsc::channel();
+        let (send, recv) = prioritized_mpsc::channel(merge_fn);
         (
             send,
             SourceManager {

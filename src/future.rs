@@ -170,13 +170,12 @@ mod test {
         type Priority = ();
 
         fn priority(&self) -> Self::Priority {}
+    }
 
-        const ATTEMPT_MERGE_INTO: Option<fn(Self, &mut Self) -> crate::MergeResult<Self>> =
-            Some(|this, target| {
-                target.1.push_str(&this.1);
-                target.0.merge(this.0);
-                MergeResult::Success
-            });
+    fn merge(this: MyJob, target: &mut MyJob) -> crate::MergeResult<MyJob> {
+        target.1.push_str(&this.1);
+        target.0.merge(this.0);
+        MergeResult::Success
     }
 
     #[test]
@@ -217,7 +216,7 @@ mod test {
         let (promise2, fut2) = Promise::new();
         let mut job = MyJob(promise1, "hello".to_string());
         let job2 = MyJob(promise2, "world".to_string());
-        (MyJob::ATTEMPT_MERGE_INTO.unwrap())(job2, &mut job);
+        merge(job2, &mut job);
         thread::spawn(move || job.execute());
         assert_eq!(Ok("helloworld".to_string()), block_on(fut1));
         assert_eq!(Ok("helloworld".to_string()), block_on(fut2));
@@ -229,7 +228,7 @@ mod test {
         let (promise2, fut2) = Promise::new();
         let mut job = MyJob(promise1, "hello".to_string());
         let job2 = MyJob(promise2, "world".to_string());
-        (MyJob::ATTEMPT_MERGE_INTO.unwrap())(job2, &mut job);
+        merge(job2, &mut job);
         thread::spawn(move || job.execute());
         assert_eq!(Ok("helloworld".to_string()), block_on(fut2));
         assert_eq!(Ok("helloworld".to_string()), block_on(fut1));
@@ -241,7 +240,7 @@ mod test {
         let (promise2, fut2) = Promise::new();
         let mut job = MyJob(promise1, "hello".to_string());
         let job2 = MyJob(promise2, "world".to_string());
-        (MyJob::ATTEMPT_MERGE_INTO.unwrap())(job2, &mut job);
+        merge(job2, &mut job);
         thread::spawn(move || drop(job));
         assert!(block_on(fut1).is_err());
         assert!(block_on(fut2).is_err());
@@ -253,7 +252,7 @@ mod test {
         let (promise2, fut2) = Promise::new();
         let mut job = MyJob(promise1, "hello".to_string());
         let job2 = MyJob(promise2, "world".to_string());
-        (MyJob::ATTEMPT_MERGE_INTO.unwrap())(job2, &mut job);
+        merge(job2, &mut job);
         thread::spawn(move || drop(job));
         assert!(block_on(fut2).is_err());
         assert!(block_on(fut1).is_err());

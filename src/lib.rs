@@ -34,7 +34,7 @@
 //!
 //! ```
 //! use std::time::Duration;
-//! use gaffer::{Builder, Job, MergeResult, NoExclusion, Prioritised};
+//! use gaffer::{Builder, Job, NoExclusion, Prioritised};
 //!
 //! fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let _runner = Builder::new()
@@ -70,8 +70,6 @@
 //!
 //!     fn priority(&self) -> Self::Priority {}
 //!
-//!     const ATTEMPT_MERGE_INTO: Option<fn(Self, &mut Self) -> MergeResult<Self>> = None;
-//!
 //!     /// matches needs to be implemented for recurring jobs, it must return `true` for a `.clone()` of it's self
 //!     fn matches(&self, job: &Self) -> bool {
 //!         self.0 == job.0
@@ -84,7 +82,7 @@
 //! Call [`JobRunner::send`] to add jobs onto the queue, they will be executed in the order that they are enqueued
 //!
 //! ```
-//! use gaffer::{Builder, Job, MergeResult, NoExclusion, Prioritised};
+//! use gaffer::{Builder, Job, NoExclusion, Prioritised};
 //! use std::time::Duration;
 //!
 //! fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -121,8 +119,6 @@
 //!
 //!     fn priority(&self) -> Self::Priority {}
 //!
-//!     const ATTEMPT_MERGE_INTO: Option<fn(Self, &mut Self) -> MergeResult<Self>> = None;
-//!
 //!     fn matches(&self, _job: &Self) -> bool {
 //!         false
 //!     }
@@ -134,7 +130,7 @@
 //! Return a value from [`Prioritised::priority`] and jobs from the queue will be executed in priority order
 //!
 //! ```
-//! use gaffer::{Builder, Job, MergeResult, NoExclusion, Prioritised};
+//! use gaffer::{Builder, Job, NoExclusion, Prioritised};
 //! use std::time::Duration;
 //!
 //! fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -173,8 +169,6 @@
 //!         self.1
 //!     }
 //!
-//!     const ATTEMPT_MERGE_INTO: Option<fn(Self, &mut Self) -> MergeResult<Self>> = None;
-//!
 //!     fn matches(&self, _job: &Self) -> bool {
 //!         false
 //!     }
@@ -191,7 +185,14 @@
 //! use std::time::Duration;
 //!
 //! fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     let runner = Builder::new().build(1);
+//!     let runner = Builder::new().enable_merge(|this: MergeJob, that: &mut MergeJob| {
+//!         if this.matches(that) {
+//!             that.0 = format!("{}x", &that.0[..that.0.len() - 1]);
+//!             MergeResult::Success
+//!         } else {
+//!             MergeResult::NotMerged(this)
+//!         }
+//!     }).build(1);
 //!
 //!     for i in 10..=50 {
 //!         runner.send(MergeJob(format!("Job {}", i)))?;
@@ -223,16 +224,6 @@
 //!     type Priority = ();
 //!
 //!     fn priority(&self) -> Self::Priority {}
-//!
-//!     const ATTEMPT_MERGE_INTO: Option<fn(Self, &mut Self) -> MergeResult<Self>> =
-//!         Some(|this, that| {
-//!             if this.matches(that) {
-//!                 that.0 = format!("{}x", &that.0[..that.0.len() - 1]);
-//!                 MergeResult::Success
-//!             } else {
-//!                 MergeResult::NotMerged(this)
-//!             }
-//!         });
 //!
 //!     fn matches(&self, that: &Self) -> bool {
 //!         self.0[..self.0.len() - 1] == that.0[..that.0.len() - 1]
@@ -281,8 +272,6 @@
 //!     type Priority = ();
 //!
 //!     fn priority(&self) -> Self::Priority {}
-//!
-//!     const ATTEMPT_MERGE_INTO: Option<fn(Self, &mut Self) -> MergeResult<Self>> = None;
 //!
 //!     fn matches(&self, _job: &Self) -> bool {
 //!         false
@@ -338,8 +327,6 @@
 //!         self.1
 //!     }
 //!
-//!     const ATTEMPT_MERGE_INTO: Option<fn(Self, &mut Self) -> MergeResult<Self>> = None;
-//!
 //!     fn matches(&self, _job: &Self) -> bool {
 //!         false
 //!     }
@@ -360,7 +347,15 @@
 //! use futures::{executor::block_on, FutureExt, StreamExt};
 //!
 //! fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     let runner = Builder::new().build(1);
+//!     let runner = Builder::new().enable_merge(|this: ProcessString, that: &mut ProcessString| {
+//!         if this.matches(that) {
+//!             that.0 = format!("{}x", &that.0[..that.0.len() - 1]);
+//!             that.1.merge(this.1);
+//!             MergeResult::Success
+//!         } else {
+//!             MergeResult::NotMerged(this)
+//!         }
+//!     }).build(1);
 //!
 //!     let mut futures: futures::stream::SelectAll<_> = (10..=50)
 //!         .filter_map(|i| {
@@ -420,17 +415,6 @@
 //!
 //!     fn priority(&self) -> Self::Priority {}
 //!
-//!     const ATTEMPT_MERGE_INTO: Option<fn(Self, &mut Self) -> MergeResult<Self>> =
-//!         Some(|this, that| {
-//!             if this.matches(that) {
-//!                 that.0 = format!("{}x", &that.0[..that.0.len() - 1]);
-//!                 that.1.merge(this.1);
-//!                 MergeResult::Success
-//!             } else {
-//!                 MergeResult::NotMerged(this)
-//!             }
-//!         });
-//!
 //!     fn matches(&self, that: &Self) -> bool {
 //!         self.0[..self.0.len() - 1] == that.0[..that.0.len() - 1]
 //!     }
@@ -475,6 +459,7 @@ impl<J: Job + 'static> JobRunner<J> {
         Builder {
             concurrency_limit: Box::new(|_: <J as Prioritised>::Priority| None as Option<u8>),
             recurring: vec![],
+            merge_fn: None,
         }
     }
 
@@ -496,6 +481,8 @@ impl<J: Prioritised + 'static> Clone for JobRunner<J> {
 pub struct Builder<J: Job + 'static, R> {
     concurrency_limit: Box<ConcurrencyLimitFn<J>>,
     recurring: Vec<R>,
+    /// optional function to allow merging of jobs
+    merge_fn: Option<fn(J, &mut J) -> MergeResult<J>>,
 }
 
 impl<J: Job + Send + Clone + 'static> Builder<J, IntervalRecurringJob<J>> {
@@ -504,6 +491,7 @@ impl<J: Job + Send + Clone + 'static> Builder<J, IntervalRecurringJob<J>> {
         Builder {
             concurrency_limit: Box::new(|_: <J as Prioritised>::Priority| None as Option<u8>),
             recurring: vec![],
+            merge_fn: None,
         }
     }
 
@@ -514,6 +502,12 @@ impl<J: Job + Send + Clone + 'static> Builder<J, IntervalRecurringJob<J>> {
             interval,
             job,
         });
+        self
+    }
+
+    /// Enable merging of Jobs in the queue, if a merge function is provided here, it will be tried with each job added to the queue against each job already in the queue
+    pub fn enable_merge(mut self, f: fn(J, &mut J) -> MergeResult<J>) -> Self {
+        self.merge_fn = Some(f);
         self
     }
 }
@@ -536,7 +530,8 @@ impl<J: Job + 'static, R: RecurringJob<J> + Send + 'static> Builder<J, R> {
 
     /// Build the [`JobRunner`], spawning `thread_num` threads as workers
     pub fn build(self, thread_num: usize) -> JobRunner<J> {
-        let (sender, sources) = SourceManager::<J, R>::new_with_recurring(self.recurring);
+        let (sender, sources) =
+            SourceManager::<J, R>::new_with_recurring(self.recurring, self.merge_fn);
         let jobs = Arc::new(Mutex::new(sources));
         let _threads = runner::spawn(thread_num, jobs, self.concurrency_limit);
         JobRunner { sender }
@@ -567,9 +562,6 @@ pub trait Prioritised: Sized {
     fn matches(&self, _job: &Self) -> bool {
         false
     }
-
-    /// optional function to allow merging of jobs
-    const ATTEMPT_MERGE_INTO: Option<fn(Self, &mut Self) -> MergeResult<Self>> = None;
 }
 
 /// Result of an attempted merge, see [`Prioritised::ATTEMPT_MERGE_INTO`]

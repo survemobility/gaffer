@@ -388,7 +388,7 @@ mod test {
             worker_index: 0,
             concurrency_limit: Arc::new(|()| None),
         };
-        let job_recv = state.completed_job(PriorityQueue::new().drain());
+        let job_recv = state.completed_job(PriorityQueue::new(None).drain());
         assert!(matches!(job_recv, PostJobTransition::BecomeAvailable(_)));
         let workers = state.workers.lock();
         assert!(matches!(workers[0], WorkerState::Available(_)));
@@ -405,7 +405,7 @@ mod test {
             worker_index: 0,
             concurrency_limit: Arc::new(|()| None),
         };
-        let job_recv = state.completed_job(PriorityQueue::new().drain());
+        let job_recv = state.completed_job(PriorityQueue::new(None).drain());
         assert!(matches!(job_recv, PostJobTransition::BecomeSupervisor));
         let workers = state.workers.lock();
         assert!(workers[0].is_supervisor());
@@ -422,7 +422,7 @@ mod test {
             worker_index: 0,
             concurrency_limit: Arc::new(|()| None),
         };
-        let mut queue = PriorityQueue::new();
+        let mut queue = PriorityQueue::new(None);
         queue.enqueue(ExcludedJob(3));
         let job_recv = state.completed_job(queue.drain());
         assert!(
@@ -446,7 +446,7 @@ mod test {
             worker_index: 0,
             concurrency_limit: Arc::new(|()| None),
         };
-        let mut queue = PriorityQueue::new();
+        let mut queue = PriorityQueue::new(None);
         queue.enqueue(ExcludedJob(1));
         let job_recv = state.completed_job(queue.drain());
         assert!(matches!(job_recv, PostJobTransition::BecomeSupervisor));
@@ -466,7 +466,7 @@ mod test {
             worker_index: 0,
             concurrency_limit: Arc::new(|num| Some(num)),
         };
-        let mut queue = PriorityQueue::new();
+        let mut queue = PriorityQueue::new(None);
         queue.enqueue(PrioritisedJob(1));
         let job_recv = state.completed_job(queue.drain());
         assert!(matches!(job_recv, PostJobTransition::BecomeSupervisor));

@@ -10,7 +10,17 @@ use std::time::Duration;
 use futures::{executor::block_on, FutureExt, StreamExt};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let runner = Builder::new().build(1);
+    let runner = Builder::new()
+        .enable_merge(|this: ProcessString, that: &mut ProcessString| {
+            if this.matches(that) {
+                that.0 = format!("{}x", &that.0[..that.0.len() - 1]);
+                that.1.merge(this.1);
+                MergeResult::Success
+            } else {
+                MergeResult::NotMerged(this)
+            }
+        })
+        .build(1);
 
     let mut futures: futures::stream::SelectAll<_> = (10..=50)
         .filter_map(|i| {
@@ -69,17 +79,6 @@ impl Prioritised for ProcessString {
     type Priority = ();
 
     fn priority(&self) -> Self::Priority {}
-
-    const ATTEMPT_MERGE_INTO: Option<fn(Self, &mut Self) -> MergeResult<Self>> =
-        Some(|this, that| {
-            if this.matches(that) {
-                that.0 = format!("{}x", &that.0[..that.0.len() - 1]);
-                that.1.merge(this.1);
-                MergeResult::Success
-            } else {
-                MergeResult::NotMerged(this)
-            }
-        });
 
     fn matches(&self, that: &Self) -> bool {
         self.0[..self.0.len() - 1] == that.0[..that.0.len() - 1]

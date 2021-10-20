@@ -5,7 +5,16 @@ use gaffer::{Builder, Job, MergeResult, NoExclusion, Prioritised};
 use std::time::Duration;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let runner = Builder::new().build(1);
+    let runner = Builder::new()
+        .enable_merge(|this: MergeJob, that: &mut MergeJob| {
+            if this.matches(that) {
+                that.0 = format!("{}x", &that.0[..that.0.len() - 1]);
+                MergeResult::Success
+            } else {
+                MergeResult::NotMerged(this)
+            }
+        })
+        .build(1);
 
     for i in 10..=50 {
         runner.send(MergeJob(format!("Job {}", i)))?;
@@ -37,16 +46,6 @@ impl Prioritised for MergeJob {
     type Priority = ();
 
     fn priority(&self) -> Self::Priority {}
-
-    const ATTEMPT_MERGE_INTO: Option<fn(Self, &mut Self) -> MergeResult<Self>> =
-        Some(|this, that| {
-            if this.matches(that) {
-                that.0 = format!("{}x", &that.0[..that.0.len() - 1]);
-                MergeResult::Success
-            } else {
-                MergeResult::NotMerged(this)
-            }
-        });
 
     fn matches(&self, that: &Self) -> bool {
         self.0[..self.0.len() - 1] == that.0[..that.0.len() - 1]

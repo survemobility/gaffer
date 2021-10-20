@@ -114,8 +114,6 @@ fn panic_in_job() {
         type Priority = ();
 
         fn priority(&self) -> Self::Priority {}
-
-        const ATTEMPT_MERGE_INTO: Option<fn(Self, &mut Self) -> MergeResult<Self>> = None;
     }
     impl Job for PanicJob {
         type Exclusion = NoExclusion;
