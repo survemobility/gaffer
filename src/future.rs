@@ -96,7 +96,7 @@ impl<T> Drop for Promise<T> {
     }
 }
 
-impl<T: Clone> Promise<T> {
+impl<T> Promise<T> {
     /// Create the sending and receiving parts of the promise.
     pub fn new() -> (Promise<T>, PromiseFuture<T>) {
         let shared = Default::default();
@@ -108,7 +108,15 @@ impl<T: Clone> Promise<T> {
         )
     }
 
-    /// Fulfill the promise, the future will be woken and can retrieve the result
+    /// Fulfill the promise, the future will be woken and can retrieve the result, if used on a merged [Promise] the merged futures will receive [PromiseDropped]. So prefer [Promise::fulfill] on mergable results.
+    pub fn fulfill_unmergable(self, result: T) {
+        let mut data = self.shared.inner();
+        data.result.replace(result);
+    }
+}
+
+impl<T: Clone> Promise<T> {
+    /// Fulfill the promise, the future will be woken and can retrieve the result. Any merged Promises will be fulfilled at the same time
     pub fn fulfill(self, result: T) {
         let mut data = self.shared.inner();
         if let Some(merged) = data.merged.take() {
@@ -150,7 +158,7 @@ mod test {
 
     use futures::executor::block_on;
 
-    use crate::{Job, MergeResult, Prioritised};
+    use crate::{Job, MergeResult};
 
     use super::*;
 
@@ -161,15 +169,13 @@ mod test {
 
         fn exclusion(&self) -> Self::Exclusion {}
 
-        fn execute(self) {
-            self.0.fulfill(self.1)
-        }
-    }
-
-    impl Prioritised for MyJob {
         type Priority = ();
 
         fn priority(&self) -> Self::Priority {}
+
+        fn execute(self) {
+            self.0.fulfill(self.1)
+        }
     }
 
     fn merge(this: MyJob, target: &mut MyJob) -> crate::MergeResult<MyJob> {

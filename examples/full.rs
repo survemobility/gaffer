@@ -12,10 +12,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use gaffer::{Builder, ExclusionOption, Job, MergeResult, Prioritised};
+use gaffer::{ExclusionOption, Job, JobRunner, MergeResult, RecurrableJob};
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let mut runner = Builder::new()
+    let mut runner = JobRunner::builder()
         .enable_merge(|me: WaitJob, other: &mut WaitJob| -> MergeResult<WaitJob> {
             if me.2.is_some() && me.2 == other.2 {
                 other.0 += me.0;
@@ -70,17 +70,17 @@ impl Job for WaitJob {
         thread::sleep(self.0);
         println!("Completed job {:?}", self);
     }
-}
 
-impl Prioritised for WaitJob {
     type Priority = u8;
 
     fn priority(&self) -> Self::Priority {
         self.1.into()
     }
+}
 
-    fn matches(&self, job: &Self) -> bool {
-        self.2.is_some() && self.2 == job.2
+impl RecurrableJob for WaitJob {
+    fn matches(&self, other: &Self) -> bool {
+        self.2.is_some() && self.2 == other.2
     }
 }
 

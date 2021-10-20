@@ -1,11 +1,11 @@
 //! Example of prioritised jobs in the queue
 //!
 //! Schedules some prioritised jobs which wait for 1 second
-use gaffer::{Builder, Job, NoExclusion, Prioritised};
+use gaffer::{Job, JobRunner, NoExclusion};
 use std::time::Duration;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let runner = Builder::new().build(1);
+    let runner = JobRunner::builder().build(1);
 
     for (i, priority) in (1..=5).zip([1, 2].iter().cycle()) {
         runner.send(PrioritisedJob(format!("Job {}", i), *priority))?;
@@ -16,7 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct PrioritisedJob(String, u8);
 
 impl Job for PrioritisedJob {
@@ -26,13 +26,6 @@ impl Job for PrioritisedJob {
         NoExclusion
     }
 
-    fn execute(self) {
-        std::thread::sleep(Duration::from_secs(1));
-        println!("Completed job {:?}", self);
-    }
-}
-
-impl Prioritised for PrioritisedJob {
     type Priority = u8;
 
     /// This Job is prioritied
@@ -40,7 +33,8 @@ impl Prioritised for PrioritisedJob {
         self.1
     }
 
-    fn matches(&self, _job: &Self) -> bool {
-        false
+    fn execute(self) {
+        std::thread::sleep(Duration::from_secs(1));
+        println!("Completed job {:?}", self);
     }
 }

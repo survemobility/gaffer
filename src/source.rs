@@ -4,6 +4,7 @@ use parking_lot::{Mutex, MutexGuard};
 use std::{
     fmt,
     iter::Iterator,
+    ops::{Deref, DerefMut},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -15,13 +16,13 @@ use self::util::{prioritized_mpsc, Drain, PriorityQueue};
 pub(crate) mod util;
 
 /// Contains a prioritised queue of jobs, adding recurring jobs which should always be scheduled with some interval
-pub struct SourceManager<J: Prioritised, R = IntervalRecurringJob<J>> {
+pub(crate) struct SourceManager<J: Prioritised, R> {
     queue: prioritized_mpsc::Receiver<J>,
     recurring: Vec<R>,
 }
 
 #[cfg(test)]
-impl<J: Prioritised + Send + Clone + 'static> SourceManager<J, IntervalRecurringJob<J>> {
+impl<J: Prioritised + Send + RecurrableJob + 'static> SourceManager<J, IntervalRecurringJob<J>> {
     /// Set a job as recurring, the job will be enqueued every time `interval` passes since the last enqueue of a matching job
     fn set_recurring(&mut self, interval: Duration, last_enqueue: Instant, job: J) {
         self.recurring.push(IntervalRecurringJob {
@@ -134,14 +135,34 @@ pub trait RecurringJob<J> {
     fn max_sleep(&self) -> Instant;
 }
 
+impl<J> RecurringJob<J> for Box<dyn RecurringJob<J> + Send> {
+    fn get(&self) -> Option<J> {
+        self.deref().get()
+    }
+
+    fn job_enqueued(&mut self, job: &J) {
+        self.deref_mut().job_enqueued(job)
+    }
+
+    fn max_sleep(&self) -> Instant {
+        self.deref().max_sleep()
+    }
+}
+
+/// A job which can be rescheduled through cloning
+pub trait RecurrableJob: Clone {
+    /// When a job matching a `Recurrablejob` is scheduled, this resets the recurrance interval
+    fn matches(&self, other: &Self) -> bool;
+}
+
 /// Recurring job which works by updating the last time a job was enqueued reenqueueing after some interval
-pub struct IntervalRecurringJob<J> {
+pub struct IntervalRecurringJob<J: RecurrableJob> {
     pub(crate) last_enqueue: Instant,
     pub(crate) interval: Duration,
     pub(crate) job: J,
 }
 
-impl<J: Prioritised + Clone> RecurringJob<J> for IntervalRecurringJob<J> {
+impl<J: RecurrableJob> RecurringJob<J> for IntervalRecurringJob<J> {
     fn get(&self) -> Option<J> {
         if Instant::now() > self.last_enqueue + self.interval {
             Some(self.job.clone())
@@ -162,7 +183,7 @@ impl<J: Prioritised + Clone> RecurringJob<J> for IntervalRecurringJob<J> {
 }
 
 /// Just until the never type is stable, this represents that the job does not recur
-pub enum NeverRecur {}
+enum NeverRecur {}
 
 impl<J> RecurringJob<J> for NeverRecur {
     fn get(&self) -> Option<J> {
@@ -190,7 +211,7 @@ mod test {
 
     use super::*;
 
-    #[derive(Debug, PartialEq, Eq, Clone)]
+    #[derive(Debug, Clone, PartialEq)]
     struct Tester(u8);
 
     impl Prioritised for Tester {
@@ -199,9 +220,11 @@ mod test {
         fn priority(&self) -> Self::Priority {
             self.0
         }
+    }
 
-        fn matches(&self, job: &Self) -> bool {
-            self.0 == job.0
+    impl RecurrableJob for Tester {
+        fn matches(&self, other: &Self) -> bool {
+            self.eq(other)
         }
     }
 

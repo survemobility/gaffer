@@ -9,7 +9,7 @@ use crate::{MergeResult, Prioritised};
 
 use self::may_be_taken::SkipIterator;
 
-pub struct PriorityQueue<T: Prioritised> {
+pub(crate) struct PriorityQueue<T: Prioritised> {
     map: BTreeMap<Reverse<T::Priority>, VecDeque<T>>,
     merge_fn: Option<fn(T, &mut T) -> MergeResult<T>>,
 }
@@ -24,7 +24,7 @@ impl<T: Prioritised> PriorityQueue<T> {
     pub fn new(merge_fn: Option<fn(T, &mut T) -> MergeResult<T>>) -> Self {
         Self {
             map: BTreeMap::new(),
-            merge_fn: merge_fn,
+            merge_fn,
         }
     }
 
@@ -119,7 +119,7 @@ where
     }
 }
 
-pub struct Drain<T: Prioritised, Q: DerefMut<Target = PriorityQueue<T>>> {
+pub(crate) struct Drain<T: Prioritised, Q: DerefMut<Target = PriorityQueue<T>>> {
     queue: Q,
     skip: usize,
 }
@@ -373,7 +373,7 @@ pub(crate) mod prioritized_mpsc {
 
     use super::PriorityQueue;
 
-    pub struct Receiver<T: Prioritised> {
+    pub(crate) struct Receiver<T: Prioritised> {
         queue: Arc<Mutex<PriorityQueue<T>>>,
         recv: crossbeam_channel::Receiver<T>,
     }
@@ -438,7 +438,7 @@ pub(crate) mod prioritized_mpsc {
     }
 
     /// Produces an mpsc channel where, in the event that multiple jobs are already ready, they are produced in priority order
-    pub fn channel<T: Prioritised>(
+    pub(crate) fn channel<T: Prioritised>(
         merge_fn: Option<fn(T, &mut T) -> MergeResult<T>>,
     ) -> (crossbeam_channel::Sender<T>, Receiver<T>) {
         let (send, recv) = crossbeam_channel::unbounded();
