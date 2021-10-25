@@ -5,7 +5,7 @@
 //! __Features__
 //!
 //! * Recurring jobs: jobs which will be re-enqueued at some interval
-//! * Job queue: use an [`crossbeam_channel::Sender<YourJob>`] to send jobs
+//! * Job queue: send jobs from various threads using the cloneable [`JobRunner`]
 //! * Future Jobs: (Optionally) create `Future`s to get results from the jobs
 //! * Job prioritisation: provide a priority for jobs and all the jobs will be executed in that order
 //! * Job merging: merge identical / similar jobs in the queue to reduce workload
