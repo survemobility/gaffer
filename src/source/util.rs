@@ -9,27 +9,29 @@ use crate::{MergeResult, Prioritised};
 
 use self::may_be_taken::SkipIterator;
 
-pub struct PriorityQueue<T: Prioritised> {
+pub(crate) struct PriorityQueue<T: Prioritised> {
     map: BTreeMap<Reverse<T::Priority>, VecDeque<T>>,
+    merge_fn: Option<fn(T, &mut T) -> MergeResult<T>>,
 }
 
 impl<T: Prioritised> Default for PriorityQueue<T> {
     fn default() -> Self {
-        PriorityQueue::new()
+        PriorityQueue::new(None)
     }
 }
 
 impl<T: Prioritised> PriorityQueue<T> {
-    pub fn new() -> Self {
+    pub fn new(merge_fn: Option<fn(T, &mut T) -> MergeResult<T>>) -> Self {
         Self {
             map: BTreeMap::new(),
+            merge_fn,
         }
     }
 
     /// Enqueues the item so that it will be iterated before any existing items in the queue with a lower priority and after any existing items with the same or higher priority.
     /// If `T` has a merge function in `T::ATTEMPT_MERGE_INTO`, the item will be merged into the highest priority existing item which merges successfully. The queue should maintain a state where everything that can be merged is merged, as long as the merge function is transitive in it's successes.
     pub fn enqueue(&mut self, mut item: T) {
-        if let Some(attempt_merge) = T::ATTEMPT_MERGE_INTO {
+        if let Some(attempt_merge) = self.merge_fn {
             for (Reverse(priority), bucket) in &mut self.map {
                 // for now we iterate over the whole queue to look for merges, not the best solution
                 for (idx, existing) in bucket.iter_mut().enumerate() {
@@ -117,7 +119,7 @@ where
     }
 }
 
-pub struct Drain<T: Prioritised, Q: DerefMut<Target = PriorityQueue<T>>> {
+pub(crate) struct Drain<T: Prioritised, Q: DerefMut<Target = PriorityQueue<T>>> {
     queue: Q,
     skip: usize,
 }
@@ -280,7 +282,7 @@ mod test {
 
     #[test]
     fn priority_queue_elements_come_out_prioritised_and_in_order() {
-        let mut queue = PriorityQueue::new();
+        let mut queue = PriorityQueue::new(None);
         queue.enqueue(PrioritisedJob(2, 'a'));
         queue.enqueue(PrioritisedJob(2, 'b'));
         queue.enqueue(PrioritisedJob(1, 'd'));
@@ -292,7 +294,7 @@ mod test {
 
     #[test]
     fn drain_peek() {
-        let mut queue = PriorityQueue::new();
+        let mut queue = PriorityQueue::new(None);
         queue.enqueue(PrioritisedJob(1, 'a'));
         queue.enqueue(PrioritisedJob(1, 'b'));
         let mut drain = queue.drain();
@@ -306,7 +308,7 @@ mod test {
 
     #[test]
     fn drain_skip() {
-        let mut queue = PriorityQueue::new();
+        let mut queue = PriorityQueue::new(None);
         queue.enqueue(PrioritisedJob(1, 'a'));
         queue.enqueue(PrioritisedJob(1, 'b'));
         queue.enqueue(PrioritisedJob(1, 'c'));
@@ -335,21 +337,20 @@ mod test {
         fn priority(&self) -> Self::Priority {
             TestPriority(self.0)
         }
+    }
 
-        const ATTEMPT_MERGE_INTO: Option<fn(Self, &mut Self) -> MergeResult<Self>> =
-            Some(|me: Self, other: &mut Self| -> MergeResult<Self> {
-                if me.1 == other.1 {
-                    other.0 = other.0.max(me.0);
-                    MergeResult::Success
-                } else {
-                    MergeResult::NotMerged(me)
-                }
-            });
+    fn merge(me: MergableJob, other: &mut MergableJob) -> MergeResult<MergableJob> {
+        if me.1 == other.1 {
+            other.0 = other.0.max(me.0);
+            MergeResult::Success
+        } else {
+            MergeResult::NotMerged(me)
+        }
     }
 
     #[test]
     fn priority_queue_elements_are_merged() {
-        let mut queue = PriorityQueue::new();
+        let mut queue = PriorityQueue::new(Some(merge));
         queue.enqueue(MergableJob(2, 'a'));
         queue.enqueue(MergableJob(1, 'a'));
         queue.enqueue(MergableJob(1, 'b'));
@@ -368,11 +369,11 @@ pub(crate) mod prioritized_mpsc {
     use parking_lot::{Mutex, MutexGuard};
     use std::{fmt, sync::Arc, thread, time::Duration};
 
-    use crate::Prioritised;
+    use crate::{MergeResult, Prioritised};
 
     use super::PriorityQueue;
 
-    pub struct Receiver<T: Prioritised> {
+    pub(crate) struct Receiver<T: Prioritised> {
         queue: Arc<Mutex<PriorityQueue<T>>>,
         recv: crossbeam_channel::Receiver<T>,
     }
@@ -437,12 +438,14 @@ pub(crate) mod prioritized_mpsc {
     }
 
     /// Produces an mpsc channel where, in the event that multiple jobs are already ready, they are produced in priority order
-    pub fn channel<T: Prioritised>() -> (crossbeam_channel::Sender<T>, Receiver<T>) {
+    pub(crate) fn channel<T: Prioritised>(
+        merge_fn: Option<fn(T, &mut T) -> MergeResult<T>>,
+    ) -> (crossbeam_channel::Sender<T>, Receiver<T>) {
         let (send, recv) = crossbeam_channel::unbounded();
         (
             send,
             Receiver {
-                queue: Arc::new(Mutex::new(PriorityQueue::new())),
+                queue: Arc::new(Mutex::new(PriorityQueue::new(merge_fn))),
                 recv,
             },
         )
@@ -467,14 +470,14 @@ pub(crate) mod prioritized_mpsc {
 
         #[test]
         fn timeout_expires() {
-            let (_send, mut recv) = channel::<Tester>();
+            let (_send, mut recv) = channel::<Tester>(None);
             recv.process_queue_timeout(Duration::from_micros(1), false, |_| {});
             assert_eq!(recv.drain().count(), 0);
         }
 
         #[test]
         fn returns_immediately() {
-            let (send, mut recv) = channel::<Tester>();
+            let (send, mut recv) = channel::<Tester>(None);
             send.send(Tester(0)).unwrap();
             let instant = Instant::now();
             recv.process_queue_timeout(Duration::from_millis(1), false, |_| {});
@@ -484,7 +487,7 @@ pub(crate) mod prioritized_mpsc {
 
         #[test]
         fn bunch_of_items_are_prioritised() {
-            let (send, mut recv) = channel::<Tester>();
+            let (send, mut recv) = channel::<Tester>(None);
             send.send(Tester(2)).unwrap();
             send.send(Tester(3)).unwrap();
             send.send(Tester(1)).unwrap();

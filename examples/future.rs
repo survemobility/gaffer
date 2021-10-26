@@ -3,14 +3,24 @@
 //! Schedules some jobs which wait for 1 second, obtaining a future which completes with a result from the job, when a merged job completes, all of the futures for all of the merged jobs complete together
 use gaffer::{
     future::{Promise, PromiseFuture},
-    Builder, Job, JobRunner, MergeResult, NoExclusion, Prioritised,
+    Job, JobRunner, MergeResult, NoExclusion,
 };
 use std::time::Duration;
 
 use futures::{executor::block_on, FutureExt, StreamExt};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let runner = Builder::new().build(1);
+    let runner = JobRunner::builder()
+        .enable_merge(|this: ProcessString, that: &mut ProcessString| {
+            if this.0[..this.0.len() - 1] == that.0[..that.0.len() - 1] {
+                that.0 = format!("{}x", &that.0[..that.0.len() - 1]);
+                that.1.merge(this.1);
+                MergeResult::Success
+            } else {
+                MergeResult::NotMerged(this)
+            }
+        })
+        .build(1);
 
     let mut futures: futures::stream::SelectAll<_> = (10..=50)
         .filter_map(|i| {
@@ -43,13 +53,6 @@ impl ProcessString {
     }
 }
 
-/// Clone is needed for recurring jobs which doesn't make sense for promises, it is a deficiency in the api that Clone needs to be implemented here and it won't be called
-impl Clone for ProcessString {
-    fn clone(&self) -> Self {
-        panic!()
-    }
-}
-
 impl Job for ProcessString {
     type Exclusion = NoExclusion;
 
@@ -57,31 +60,13 @@ impl Job for ProcessString {
         NoExclusion
     }
 
-    fn execute(self) {
-        println!("Processing job {}", self.0);
-        std::thread::sleep(Duration::from_secs(1));
-        self.1.fulfill(format!("Processed : [{}]", self.0));
-    }
-}
-
-/// This Job isn't actually prioritised but this trait needs to be implemented for now
-impl Prioritised for ProcessString {
     type Priority = ();
 
     fn priority(&self) -> Self::Priority {}
 
-    const ATTEMPT_MERGE_INTO: Option<fn(Self, &mut Self) -> MergeResult<Self>> =
-        Some(|this, that| {
-            if this.matches(that) {
-                that.0 = format!("{}x", &that.0[..that.0.len() - 1]);
-                that.1.merge(this.1);
-                MergeResult::Success
-            } else {
-                MergeResult::NotMerged(this)
-            }
-        });
-
-    fn matches(&self, that: &Self) -> bool {
-        self.0[..self.0.len() - 1] == that.0[..that.0.len() - 1]
+    fn execute(self) {
+        println!("Processing job {}", self.0);
+        std::thread::sleep(Duration::from_secs(1));
+        self.1.fulfill(format!("Processed : [{}]", self.0));
     }
 }

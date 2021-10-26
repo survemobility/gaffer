@@ -12,10 +12,20 @@ use std::{
     time::{Duration, Instant},
 };
 
-use gaffer::{Builder, ExclusionOption, Job, MergeResult, Prioritised};
+use gaffer::{ExclusionOption, Job, JobRunner, MergeResult, RecurrableJob};
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let mut runner = Builder::new().limit_concurrency(|_priority| Some(1));
+    let mut runner = JobRunner::builder()
+        .enable_merge(|me: WaitJob, other: &mut WaitJob| -> MergeResult<WaitJob> {
+            if me.2.is_some() && me.2 == other.2 {
+                other.0 += me.0;
+                other.1 = other.1.max(me.1);
+                MergeResult::Success
+            } else {
+                MergeResult::NotMerged(me)
+            }
+        })
+        .limit_concurrency(|_priority| Some(1));
     let file = fs::File::open("examples/poll")?;
     let r = BufReader::new(file);
     for line in r.lines().take_while(Result::is_ok).flat_map(Result::ok) {
@@ -60,28 +70,17 @@ impl Job for WaitJob {
         thread::sleep(self.0);
         println!("Completed job {:?}", self);
     }
-}
 
-impl Prioritised for WaitJob {
     type Priority = u8;
 
     fn priority(&self) -> Self::Priority {
         self.1.into()
     }
+}
 
-    const ATTEMPT_MERGE_INTO: Option<fn(Self, &mut Self) -> MergeResult<Self>> =
-        Some(|me: Self, other: &mut Self| -> MergeResult<Self> {
-            if me.2.is_some() && me.2 == other.2 {
-                other.0 += me.0;
-                other.1 = other.1.max(me.1);
-                MergeResult::Success
-            } else {
-                MergeResult::NotMerged(me)
-            }
-        });
-
-    fn matches(&self, job: &Self) -> bool {
-        self.2.is_some() && self.2 == job.2
+impl RecurrableJob for WaitJob {
+    fn matches(&self, other: &Self) -> bool {
+        self.2.is_some() && self.2 == other.2
     }
 }
 

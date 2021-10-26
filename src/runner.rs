@@ -21,7 +21,7 @@ pub(crate) type ConcurrencyLimitFn<J> =
     dyn Fn(<J as Prioritised>::Priority) -> Option<u8> + Send + Sync;
 
 /// Spawn runners on `thread_num` threads, executing jobs from `jobs` and obeying the concurrency limit `concurrency_limit`
-pub fn spawn<J, R: RecurringJob<J> + Send + 'static>(
+pub(crate) fn spawn<J, R: RecurringJob<J> + Send + 'static>(
     thread_num: usize,
     jobs: Arc<Mutex<SourceManager<J, R>>>,
     concurrency_limit: Box<ConcurrencyLimitFn<J>>,
@@ -334,7 +334,7 @@ impl<J: Job> WorkerState<J> {
 
 #[cfg(test)]
 mod test {
-    use crate::{source::util::may_be_taken::VecSkipIter, Job, NoExclusion, Prioritised};
+    use crate::{source::util::may_be_taken::VecSkipIter, Job, NoExclusion};
 
     use super::*;
 
@@ -348,13 +348,11 @@ mod test {
             self.0
         }
 
-        fn execute(self) {}
-    }
-
-    impl Prioritised for ExcludedJob {
         type Priority = ();
 
         fn priority(&self) -> Self::Priority {}
+
+        fn execute(self) {}
     }
 
     struct PrioritisedJob(u8);
@@ -366,15 +364,13 @@ mod test {
             NoExclusion
         }
 
-        fn execute(self) {}
-    }
-
-    impl Prioritised for PrioritisedJob {
         type Priority = u8;
 
         fn priority(&self) -> Self::Priority {
             self.0
         }
+
+        fn execute(self) {}
     }
 
     /// if a job completes and there is another supervisor, this worker becomes available
@@ -388,7 +384,7 @@ mod test {
             worker_index: 0,
             concurrency_limit: Arc::new(|()| None),
         };
-        let job_recv = state.completed_job(PriorityQueue::new().drain());
+        let job_recv = state.completed_job(PriorityQueue::new(None).drain());
         assert!(matches!(job_recv, PostJobTransition::BecomeAvailable(_)));
         let workers = state.workers.lock();
         assert!(matches!(workers[0], WorkerState::Available(_)));
@@ -405,7 +401,7 @@ mod test {
             worker_index: 0,
             concurrency_limit: Arc::new(|()| None),
         };
-        let job_recv = state.completed_job(PriorityQueue::new().drain());
+        let job_recv = state.completed_job(PriorityQueue::new(None).drain());
         assert!(matches!(job_recv, PostJobTransition::BecomeSupervisor));
         let workers = state.workers.lock();
         assert!(workers[0].is_supervisor());
@@ -422,7 +418,7 @@ mod test {
             worker_index: 0,
             concurrency_limit: Arc::new(|()| None),
         };
-        let mut queue = PriorityQueue::new();
+        let mut queue = PriorityQueue::new(None);
         queue.enqueue(ExcludedJob(3));
         let job_recv = state.completed_job(queue.drain());
         assert!(
@@ -446,7 +442,7 @@ mod test {
             worker_index: 0,
             concurrency_limit: Arc::new(|()| None),
         };
-        let mut queue = PriorityQueue::new();
+        let mut queue = PriorityQueue::new(None);
         queue.enqueue(ExcludedJob(1));
         let job_recv = state.completed_job(queue.drain());
         assert!(matches!(job_recv, PostJobTransition::BecomeSupervisor));
@@ -466,7 +462,7 @@ mod test {
             worker_index: 0,
             concurrency_limit: Arc::new(|num| Some(num)),
         };
-        let mut queue = PriorityQueue::new();
+        let mut queue = PriorityQueue::new(None);
         queue.enqueue(PrioritisedJob(1));
         let job_recv = state.completed_job(queue.drain());
         assert!(matches!(job_recv, PostJobTransition::BecomeSupervisor));

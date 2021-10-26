@@ -110,14 +110,11 @@ fn panic_in_job() {
     let (send, recv) = crossbeam_channel::unbounded();
 
     struct PanicJob(Option<Sender<()>>);
-    impl Prioritised for PanicJob {
+    impl Job for PanicJob {
         type Priority = ();
 
         fn priority(&self) -> Self::Priority {}
 
-        const ATTEMPT_MERGE_INTO: Option<fn(Self, &mut Self) -> MergeResult<Self>> = None;
-    }
-    impl Job for PanicJob {
         type Exclusion = NoExclusion;
 
         fn exclusion(&self) -> Self::Exclusion {
@@ -148,7 +145,7 @@ impl TestHelper {
     fn new(thread_num: usize, interval: Duration, recurring: &str) -> Self {
         let (send, recv) = crossbeam_channel::unbounded();
 
-        let mut builder = gaffer::Builder::new();
+        let mut builder = gaffer::JobRunner::builder();
         for key in recurring.chars() {
             builder = builder.set_recurring(
                 interval,
@@ -201,6 +198,12 @@ struct WaitJob {
     send: crossbeam_channel::Sender<char>,
 }
 
+impl RecurrableJob for WaitJob {
+    fn matches(&self, other: &Self) -> bool {
+        self.key == other.key
+    }
+}
+
 impl Job for WaitJob {
     type Exclusion = ExclusionOption<char>;
 
@@ -208,22 +211,16 @@ impl Job for WaitJob {
         self.exclusion.into()
     }
 
-    fn execute(self) {
-        thread::sleep(self.duration);
-        println!("Completed job {:?}", self);
-        self.send.send(self.key).unwrap();
-    }
-}
-
-impl Prioritised for WaitJob {
     type Priority = u8;
 
     fn priority(&self) -> Self::Priority {
         self.priority.into()
     }
 
-    fn matches(&self, job: &Self) -> bool {
-        self.key == job.key
+    fn execute(self) {
+        thread::sleep(self.duration);
+        println!("Completed job {:?}", self);
+        self.send.send(self.key).unwrap();
     }
 }
 
