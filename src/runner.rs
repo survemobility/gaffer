@@ -86,9 +86,39 @@ where
     }
 
     fn next_job(&self) -> J {
-        let transition = self
-            .state
-            .completed_job(self.queue.lock().drain().map(|PrioritisedJob(job)| job)); // FIXME needs to filer jobs which can't be run now
+        let workers = self.state.workers();
+        assert!(workers[self.state.worker_index].is_working());
+        let mut exclusions: Vec<_> = workers
+            .iter()
+            .enumerate()
+            .flat_map(|(worker_index, state)| {
+                (self.state.worker_index != worker_index)
+                    .then(|| state.exclusion())
+                    .flatten()
+            })
+            .collect();
+        let mut working_count = workers.iter().filter(|state| state.is_working()).count() - 1; // not including self
+        drop(workers);
+
+        let transition = self.state.completed_job(
+            self.queue
+                .lock()
+                .drain_where(|job| {
+                    let job = &job.0;
+                    if let Some(max_concurrency) = (self.state.concurrency_limit)(job.priority()) {
+                        if working_count as u8 >= max_concurrency {
+                            return false;
+                        }
+                    }
+                    if exclusions.contains(&job.exclusion()) {
+                        return false;
+                    }
+                    working_count += 1;
+                    exclusions.push(job.exclusion());
+                    true
+                })
+                .map(|PrioritisedJob(job)| job),
+        );
         match transition {
             PostJobTransition::BecomeAvailable(recv) => recv
                 .recv()
@@ -318,7 +348,7 @@ impl<J: Job> WorkerState<J> {
 }
 
 #[cfg(test)]
-mod test {
+mod runner_state_test {
     use crate::{Job, NoExclusion};
 
     use super::*;
@@ -413,42 +443,6 @@ mod test {
         assert!(workers[0].is_working());
     }
 
-    /// if a job completes and there is another job, but it is excluded, another job is not taken
-    #[test]
-    #[ignore = "exclusion is handled in the drain fn, so it needs to be tested one level higher"]
-    fn working_to_supervisor_excluded() {
-        let state = RunnerState::<ExcludedJob> {
-            workers: Arc::new(Mutex::new(vec![
-                WorkerState::Working(1),
-                WorkerState::Working(2),
-            ])),
-            worker_index: 0,
-            concurrency_limit: Arc::new(|()| None),
-        };
-        let job_recv = state.completed_job(iter::once(ExcludedJob(1)));
-        assert!(matches!(job_recv, PostJobTransition::BecomeSupervisor));
-        let workers = state.workers.lock();
-        assert!(workers[0].is_supervisor());
-    }
-
-    /// if a job completes and there is another job, but it is throttled to , another job is not taken
-    #[test]
-    #[ignore = "throttling is handled in the drain fn, so it needs to be tested one level higher"]
-    fn working_to_supervisor_throttled() {
-        let state = RunnerState::<PrioritisedJob> {
-            workers: Arc::new(Mutex::new(vec![
-                WorkerState::Working(NoExclusion),
-                WorkerState::Working(NoExclusion),
-            ])),
-            worker_index: 0,
-            concurrency_limit: Arc::new(|num| Some(num)),
-        };
-        let job_recv = state.completed_job(iter::once(PrioritisedJob(1)));
-        assert!(matches!(job_recv, PostJobTransition::BecomeSupervisor));
-        let workers = state.workers.lock();
-        assert!(workers[0].is_supervisor());
-    }
-
     /// when a job is assigned the state is switched to working and the job is sent over the channel
     #[test]
     fn available_to_working() {
@@ -484,138 +478,121 @@ mod test {
         assert!(workers[0].is_working());
         assert!(workers[1].is_working());
     }
+}
 
-    // /// if a job's exclusion is equal to a running job, it should not be assigned
-    // #[test]
-    // fn equal_exclusion_running() {
-    //     let (send, recv) = crossbeam_channel::unbounded();
-    //     let state = RunnerState::<ExcludedJob> {
-    //         workers: Arc::new(Mutex::new(vec![
-    //             WorkerState::Supervisor,
-    //             WorkerState::Working(1),
-    //             WorkerState::Available(send),
-    //         ])),
-    //         worker_index: 0,
-    //         concurrency_limit: Arc::new(|()| None),
-    //     };
-    //     let mut jobs = vec![ExcludedJob(1)];
-    //     assert!(state.assign_jobs(VecSkipIter::new(&mut jobs)).is_none());
-    //     {
-    //         let workers = state.workers.lock();
-    //         assert!(workers[0].is_supervisor());
-    //         assert!(workers[1].is_working());
-    //         assert!(matches!(workers[2], WorkerState::Available(_)));
-    //     }
-    //     assert!(recv.try_recv().is_err());
-    //     assert_eq!(jobs.len(), 1);
-    // }
+#[cfg(test)]
+mod runner_test {
+    use std::time::Duration;
 
-    // /// if 2 jobs are added with the same exclusion, only the first should be added
-    // #[test]
-    // fn equal_exclusion_adding() {
-    //     let (send, recv) = crossbeam_channel::unbounded();
-    //     let state = RunnerState::<ExcludedJob> {
-    //         workers: Arc::new(Mutex::new(vec![
-    //             WorkerState::Supervisor,
-    //             WorkerState::Available(send.clone()),
-    //             WorkerState::Available(send),
-    //         ])),
-    //         worker_index: 0,
-    //         concurrency_limit: Arc::new(|()| None),
-    //     };
-    //     let mut jobs = vec![ExcludedJob(1), ExcludedJob(1)];
-    //     assert!(state.assign_jobs(VecSkipIter::new(&mut jobs)).is_none());
-    //     {
-    //         let workers = state.workers.lock();
-    //         assert!(workers[0].is_supervisor());
-    //         assert!(workers[1].is_working());
-    //         assert!(matches!(workers[2], WorkerState::Available(_)));
-    //     }
-    //     assert!(recv.try_recv().is_ok());
-    //     assert!(recv.try_recv().is_err());
-    //     assert_eq!(jobs.len(), 1);
-    // }
+    use crate::NoExclusion;
 
-    // /// a job with parrallelisation 1 won't be run if a worker is already working
-    // #[test]
-    // fn parallelisation_1_running_1() {
-    //     let state = RunnerState::<PrioritisedJob> {
-    //         workers: Arc::new(Mutex::new(vec![
-    //             WorkerState::Supervisor,
-    //             WorkerState::Working(NoExclusion),
-    //         ])),
-    //         worker_index: 0,
-    //         concurrency_limit: Arc::new(|priority| Some(priority)),
-    //     };
-    //     let mut jobs = vec![PrioritisedJob(1)];
-    //     assert!(state.assign_jobs(VecSkipIter::new(&mut jobs)).is_none());
-    //     {
-    //         let workers = state.workers.lock();
-    //         assert!(workers[0].is_supervisor());
-    //         assert!(workers[1].is_working());
-    //     }
-    //     assert_eq!(jobs.len(), 1);
-    // }
+    use super::*;
 
-    // /// a job with parrallelisation 2 will be run if 1 worker is already working
-    // #[test]
-    // fn parallelisation_2_running_1() {
-    //     let state = RunnerState::<PrioritisedJob> {
-    //         workers: Arc::new(Mutex::new(vec![
-    //             WorkerState::Supervisor,
-    //             WorkerState::Working(NoExclusion),
-    //         ])),
-    //         worker_index: 0,
-    //         concurrency_limit: Arc::new(|priority| Some(priority)),
-    //     };
-    //     assert!(state
-    //         .assign_jobs(VecSkipIter::new(&mut vec![PrioritisedJob(2)]))
-    //         .is_some());
-    //     {
-    //         let workers = state.workers.lock();
-    //         assert!(workers[0].is_working());
-    //         assert!(workers[1].is_working());
-    //     }
-    // }
+    #[derive(Debug, PartialEq, Eq)]
+    enum Event<J> {
+        Start(J),
+        End(J),
+    }
 
-    // /// only one job with parrallelisation 2 will be run if 1 worker is already working
-    // #[test]
-    // fn parallelisation_2x2_running_1() {
-    //     let (send, recv) = crossbeam_channel::unbounded();
-    //     let state = RunnerState::<PrioritisedJob> {
-    //         workers: Arc::new(Mutex::new(vec![
-    //             WorkerState::Supervisor,
-    //             WorkerState::Working(NoExclusion),
-    //             WorkerState::Available(send),
-    //         ])),
-    //         worker_index: 0,
-    //         concurrency_limit: Arc::new(|priority| Some(priority)),
-    //     };
-    //     let mut jobs = vec![PrioritisedJob(2), PrioritisedJob(2)];
-    //     assert!(state.assign_jobs(VecSkipIter::new(&mut jobs)).is_none());
-    //     {
-    //         let workers = state.workers.lock();
-    //         assert!(workers[0].is_supervisor());
-    //         assert!(workers[1].is_working());
-    //         assert!(workers[2].is_working());
-    //     }
-    //     assert!(recv.try_recv().is_ok());
-    //     assert!(recv.try_recv().is_err());
-    //     assert_eq!(jobs.len(), 1);
-    // }
+    #[derive(Debug)]
+    struct ExcludedJob(u8, Arc<Mutex<Vec<Event<u8>>>>);
 
-    // #[test]
-    // fn unassigned_jobs_not_consumed() {
-    //     let mut jobs = vec![PrioritisedJob(100), PrioritisedJob(100)];
-    //     let state = RunnerState::<PrioritisedJob> {
-    //         workers: Arc::new(Mutex::new(vec![
-    //             WorkerState::Supervisor,
-    //             WorkerState::Working(NoExclusion),
-    //         ])),
-    //         worker_index: 0,
-    //         concurrency_limit: Arc::new(|priority| Some(priority)),
-    //     };
-    //     assert!(state.assign_jobs(VecSkipIter::new(&mut jobs)).is_some());
-    //     assert_eq!(jobs.len(), 1);
-    // }
+    impl Job for ExcludedJob {
+        type Exclusion = u8;
+
+        fn exclusion(&self) -> Self::Exclusion {
+            self.0
+        }
+
+        type Priority = ();
+
+        fn priority(&self) -> Self::Priority {}
+
+        fn execute(self) {
+            self.1.lock().push(Event::Start(self.0));
+            thread::sleep(Duration::from_millis(2));
+            self.1.lock().push(Event::End(self.0));
+        }
+    }
+
+    struct PrioritisedJob(u8, Arc<Mutex<Vec<Event<u8>>>>);
+
+    impl Job for PrioritisedJob {
+        type Exclusion = NoExclusion;
+
+        fn exclusion(&self) -> Self::Exclusion {
+            NoExclusion
+        }
+
+        type Priority = u8;
+
+        fn priority(&self) -> Self::Priority {
+            self.0
+        }
+
+        fn execute(self) {
+            self.1.lock().push(Event::Start(self.0));
+            thread::sleep(Duration::from_millis(2));
+            self.1.lock().push(Event::End(self.0));
+        }
+    }
+
+    /// exclusion prevents exclusive jobs from running at the same time
+    #[test]
+    fn working_to_supervisor_excluded() {
+        let events = Arc::new(Mutex::new(vec![]));
+        let (sender, sources) =
+            SourceManager::<ExcludedJob, Box<dyn RecurringJob<ExcludedJob> + Send>>::new();
+        let jobs = Arc::new(Mutex::new(sources));
+        let threads = spawn(2, jobs, Box::new(|()| None));
+
+        thread::sleep(Duration::from_millis(10));
+        sender.send(ExcludedJob(1, events.clone())).unwrap();
+        thread::sleep(Duration::from_micros(10));
+        sender.send(ExcludedJob(1, events.clone())).unwrap();
+        sender.send(ExcludedJob(2, events.clone())).unwrap();
+
+        thread::sleep(Duration::from_millis(100)); // better to drain
+        assert_eq!(
+            *events.lock(),
+            vec![
+                Event::Start(1),
+                Event::Start(2),
+                Event::End(1),
+                Event::Start(1),
+                Event::End(2),
+                Event::End(1)
+            ]
+        );
+    }
+
+    /// if a job completes and there is another job, but it is throttled to , another job is not taken
+    /// fails due to slow unpredictable start up time for a job getting scheduled on another thread
+    #[test]
+    fn working_to_supervisor_throttled() {
+        let events = Arc::new(Mutex::new(vec![]));
+        let (sender, sources) =
+            SourceManager::<PrioritisedJob, Box<dyn RecurringJob<PrioritisedJob> + Send>>::new();
+        let jobs = Arc::new(Mutex::new(sources));
+        let threads = spawn(2, jobs, Box::new(|priority| Some(priority)));
+
+        thread::sleep(Duration::from_millis(10));
+        sender.send(PrioritisedJob(1, events.clone())).unwrap();
+        thread::sleep(Duration::from_micros(10));
+        sender.send(PrioritisedJob(1, events.clone())).unwrap();
+        sender.send(PrioritisedJob(2, events.clone())).unwrap();
+
+        thread::sleep(Duration::from_millis(100)); // TODO better to drain
+        assert_eq!(
+            *events.lock(),
+            vec![
+                Event::Start(1),
+                Event::Start(2),
+                Event::End(1),
+                Event::End(2),
+                Event::Start(1),
+                Event::End(1)
+            ]
+        );
+    }
 }
