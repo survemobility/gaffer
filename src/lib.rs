@@ -149,22 +149,24 @@
 //!
 //! ```
 //! use gaffer::{Job, JobRunner, MergeResult, NoExclusion};
-//! use std::time::Duration;
+//! use std::{sync::{Arc, atomic::{AtomicU8, Ordering}}, time::Duration};
 //!
 //! fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let runner = JobRunner::builder().enable_merge(merge_jobs).build(1);
+//!    let counter = Arc::new(AtomicU8::new(0));
 //!
 //!     for i in 10..=50 {
-//!         runner.send(MergeJob(format!("Job {}", i)))?;
+//!         runner.send(MergeJob(format!("Job {}", i), counter.clone()))?;
 //!     }
 //!
 //!     println!("Jobs enqueued");
 //!     std::thread::sleep(Duration::from_secs(7));
+//!     assert_eq!(counter.load(Ordering::SeqCst), 5);
 //!     Ok(())
 //! }
 //!
 //! #[derive(Debug)]
-//! struct MergeJob(String);
+//! struct MergeJob(String, Arc<AtomicU8>);
 //!
 //! impl Job for MergeJob {
 //!     type Exclusion = NoExclusion;
@@ -180,6 +182,7 @@
 //!     fn execute(self) {
 //!         std::thread::sleep(Duration::from_secs(1));
 //!         println!("Completed job {:?}", self);
+//!         self.1.fetch_add(1, Ordering::SeqCst);
 //!     }
 //! }
 //!
@@ -441,7 +444,7 @@ impl<J: Job + Send + 'static> Builder<J> {
     /// Start building a [`JobRunner`]
     fn new() -> Self {
         Builder {
-            concurrency_limit: Box::new(|_: <J as Prioritised>::Priority| None as Option<u8>),
+            concurrency_limit: Box::new(|_: <J as Job>::Priority| None as Option<u8>),
             recurring: vec![],
             merge_fn: None,
         }
@@ -511,23 +514,6 @@ pub trait Job: Send {
 
     /// Execute and consume the job
     fn execute(self);
-}
-
-/// A type that can be put in a priority queue, tells the queue which order the items should come out in, whether / how to merge them, and checking whether item's match
-trait Prioritised: Sized {
-    /// Type of the priority, the higher prioritys are those which are larger based on [`Ord::cmp`].
-    type Priority: Ord + Copy + Send;
-
-    /// Get the priority of this thing
-    fn priority(&self) -> Self::Priority;
-}
-
-impl<J: Job> Prioritised for J {
-    type Priority = <J as Job>::Priority;
-
-    fn priority(&self) -> Self::Priority {
-        <J as Job>::priority(self)
-    }
 }
 
 impl<T> Job for T

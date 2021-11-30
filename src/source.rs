@@ -1,6 +1,7 @@
 //! Handles job sources
 
-use parking_lot::{Mutex, MutexGuard};
+use gaffer_queue::PriorityQueue;
+use parking_lot::Mutex;
 use std::{
     fmt,
     iter::Iterator,
@@ -9,20 +10,20 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{MergeResult, Prioritised};
+use crate::{Job, MergeResult};
 
-use self::util::{prioritized_mpsc, Drain, PriorityQueue};
+use self::prioritized_mpsc::PrioritisedJob;
 
-pub(crate) mod util;
+pub(crate) mod prioritized_mpsc;
 
 /// Contains a prioritised queue of jobs, adding recurring jobs which should always be scheduled with some interval
-pub(crate) struct SourceManager<J: Prioritised, R> {
+pub(crate) struct SourceManager<J: Job, R> {
     queue: prioritized_mpsc::Receiver<J>,
     recurring: Vec<R>,
 }
 
 #[cfg(test)]
-impl<J: Prioritised + Send + RecurrableJob + 'static> SourceManager<J, IntervalRecurringJob<J>> {
+impl<J: Job + Send + RecurrableJob + 'static> SourceManager<J, IntervalRecurringJob<J>> {
     /// Set a job as recurring, the job will be enqueued every time `interval` passes since the last enqueue of a matching job
     fn set_recurring(&mut self, interval: Duration, last_enqueue: Instant, job: J) {
         self.recurring.push(IntervalRecurringJob {
@@ -33,9 +34,9 @@ impl<J: Prioritised + Send + RecurrableJob + 'static> SourceManager<J, IntervalR
     }
 }
 
-impl<J: Prioritised, R> fmt::Debug for SourceManager<J, R>
+impl<J: Job, R> fmt::Debug for SourceManager<J, R>
 where
-    <J as Prioritised>::Priority: fmt::Debug,
+    <J as Job>::Priority: fmt::Debug,
     J: fmt::Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -43,7 +44,7 @@ where
     }
 }
 
-impl<J: Prioritised + Send + 'static, R: RecurringJob<J>> SourceManager<J, R> {
+impl<J: Job + Send + 'static, R: RecurringJob<J>> SourceManager<J, R> {
     #[cfg(test)]
     /// Create a new `(Sender, SourceManager<>)` pair
     pub fn new() -> (crossbeam_channel::Sender<J>, SourceManager<J, R>) {
@@ -77,7 +78,11 @@ impl<J: Prioritised + Send + 'static, R: RecurringJob<J>> SourceManager<J, R> {
     /// Maximum wait duration would be the longest interval of all of the recurring jobs, or an arbitrary timeout. It could return immediately. It could return with no jobs. The caller should only iterate as many jobs as it can execute, the iterator should be dropped without iterating the rest.
     ///
     /// wait_for_new: if set, only returns immedaitely if there are new jobs inthe queue
-    pub fn get(&mut self, wait_for_new: bool) -> Drain<J, MutexGuard<'_, PriorityQueue<J>>> {
+    pub fn get<'s, 'p: 's, P: for<'j> FnMut(&'j PrioritisedJob<J>) -> bool + 'p>(
+        &'s mut self,
+        wait_for_new: bool,
+        predicate: P,
+    ) -> impl Iterator<Item = J> + 's {
         let timeout = self.queue_timeout();
         let recurring = &mut self.recurring;
         if timeout == Duration::ZERO {
@@ -100,7 +105,7 @@ impl<J: Prioritised + Send + 'static, R: RecurringJob<J>> SourceManager<J, R> {
             }
             self.queue.enqueue(item);
         }
-        self.queue.drain()
+        self.queue.drain_where(predicate)
     }
 
     /// get the timeout to wait for the queue based on the status of the recurring jobs
@@ -120,7 +125,7 @@ impl<J: Prioritised + Send + 'static, R: RecurringJob<J>> SourceManager<J, R> {
     }
 
     /// Gets access to the priority queue that this source uses, be careful with this `Mutex` as `get()` will also lock it.
-    pub fn queue(&self) -> Arc<Mutex<PriorityQueue<J>>> {
+    pub fn queue(&self) -> Arc<Mutex<PriorityQueue<PrioritisedJob<J>>>> {
         self.queue.queue()
     }
 }
@@ -207,18 +212,26 @@ mod test {
         time::Duration,
     };
 
-    use crate::Prioritised;
-
     use super::*;
 
     #[derive(Debug, Clone, PartialEq)]
     struct Tester(u8);
 
-    impl Prioritised for Tester {
+    impl Job for Tester {
         type Priority = u8;
 
         fn priority(&self) -> Self::Priority {
             self.0
+        }
+
+        type Exclusion = ();
+
+        fn exclusion(&self) -> Self::Exclusion {
+            todo!()
+        }
+
+        fn execute(self) {
+            todo!()
         }
     }
 
@@ -235,7 +248,7 @@ mod test {
         send.send(Tester(3)).unwrap();
         send.send(Tester(1)).unwrap();
         assert_eq!(
-            manager.get(false).collect::<Vec<_>>(),
+            manager.get(false, |_| true).collect::<Vec<_>>(),
             vec![Tester(3), Tester(2), Tester(1)]
         )
     }
@@ -249,7 +262,7 @@ mod test {
         manager.set_recurring(Duration::from_secs(1), one_min_ago, Tester(3));
         let before = Instant::now();
         assert_eq!(
-            manager.get(false).collect::<Vec<_>>(),
+            manager.get(false, |_| true).collect::<Vec<_>>(),
             vec![Tester(3), Tester(2), Tester(1)]
         );
         assert!(Instant::now().duration_since(before) < Duration::from_millis(1));
@@ -263,12 +276,12 @@ mod test {
         manager.set_recurring(Duration::from_millis(1), one_min_ago, Tester(2));
         manager.set_recurring(Duration::from_millis(1), one_min_ago, Tester(3));
         assert_eq!(
-            manager.get(false).collect::<Vec<_>>(),
+            manager.get(false, |_| true).collect::<Vec<_>>(),
             vec![Tester(3), Tester(2), Tester(1)]
         );
         let before = Instant::now();
         assert_eq!(
-            manager.get(false).collect::<Vec<_>>(),
+            manager.get(false, |_| true).collect::<Vec<_>>(),
             vec![Tester(3), Tester(2), Tester(1)]
         );
         assert!(
@@ -286,11 +299,11 @@ mod test {
         manager.set_recurring(Duration::from_millis(1), one_min_ago, Tester(2));
         manager.set_recurring(Duration::from_millis(1), one_min_ago, Tester(3));
         assert_eq!(
-            manager.get(false).take(1).collect::<Vec<_>>(),
+            manager.get(false, |_| true).take(1).collect::<Vec<_>>(),
             vec![Tester(3)]
         );
         assert_eq!(
-            manager.get(false).collect::<Vec<_>>(),
+            manager.get(false, |_| true).collect::<Vec<_>>(),
             vec![Tester(2), Tester(1)]
         );
     }
@@ -305,19 +318,22 @@ mod test {
         manager.set_recurring(Duration::from_millis(10), half_interval_ago, Tester(3));
         send.send(Tester(2)).unwrap();
         assert_eq!(
-            manager.get(false).collect::<Vec<_>>(),
+            manager.get(false, |_| true).collect::<Vec<_>>(),
             vec![Tester(2)],
             "Wrong result after {:?}",
             Instant::now().duration_since(start)
         );
         let restart = Instant::now();
         assert_eq!(
-            manager.get(false).collect::<Vec<_>>(),
+            manager.get(false, |_| true).collect::<Vec<_>>(),
             vec![Tester(3), Tester(1)],
             "Wrong result after {:?}",
             Instant::now().duration_since(restart)
         );
-        assert_eq!(manager.get(false).collect::<Vec<_>>(), vec![Tester(2)]);
+        assert_eq!(
+            manager.get(false, |_| true).collect::<Vec<_>>(),
+            vec![Tester(2)]
+        );
     }
 
     #[test]
@@ -328,7 +344,7 @@ mod test {
         manager.set_recurring(Duration::from_millis(1), now, Tester(3));
         send.send(Tester(2)).unwrap();
         assert_eq!(
-            manager.get(false).collect::<Vec<_>>(),
+            manager.get(false, |_| true).collect::<Vec<_>>(),
             vec![Tester(2)],
             "Wrong result after {:?}",
             Instant::now().duration_since(now)
@@ -343,7 +359,7 @@ mod test {
         manager.set_recurring(Duration::from_millis(1), one_min_ago, Tester(3));
         send.send(Tester(2)).unwrap();
         assert_eq!(
-            manager.get(false).collect::<Vec<_>>(),
+            manager.get(false, |_| true).collect::<Vec<_>>(),
             vec![Tester(3), Tester(2), Tester(1)]
         );
     }
@@ -365,7 +381,7 @@ mod test {
         b2.wait();
         let before = Instant::now();
         assert_eq!(
-            manager.get(false).collect::<Vec<_>>(),
+            manager.get(false, |_| true).collect::<Vec<_>>(),
             vec![Tester(3), Tester(2), Tester(1)]
         );
         assert!(Instant::now().duration_since(before) < Duration::from_millis(1));
