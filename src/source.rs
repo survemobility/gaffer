@@ -73,16 +73,22 @@ impl<J: Job + Send + 'static, R: RecurringJob<J>> SourceManager<J, R> {
         )
     }
 
-    /// Get the next batch of prioritised jobs
-    ///
-    /// Maximum wait duration would be the longest interval of all of the recurring jobs, or an arbitrary timeout. It could return immediately. It could return with no jobs. The caller should only iterate as many jobs as it can execute, the iterator should be dropped without iterating the rest.
-    ///
-    /// wait_for_new: if set, only returns immedaitely if there are new jobs inthe queue
+    #[cfg(test)]
     pub fn get<'s, 'p: 's, P: for<'j> FnMut(&'j PrioritisedJob<J>) -> bool + 'p>(
         &'s mut self,
         wait_for_new: bool,
         predicate: P,
     ) -> impl Iterator<Item = J> + 's {
+        self.process(wait_for_new);
+        self.queue.drain_where(predicate)
+    }
+
+    /// Get the next batch of prioritised jobs
+    ///
+    /// Maximum wait duration would be the longest interval of all of the recurring jobs, or an arbitrary timeout. It could return immediately. It could return with no jobs. The caller should only iterate as many jobs as it can execute, the iterator should be dropped without iterating the rest.
+    ///
+    /// wait_for_new: if set, only returns immedaitely if there are new jobs inthe queue
+    pub fn process(&mut self, wait_for_new: bool) {
         let timeout = self.queue_timeout();
         let recurring = &mut self.recurring;
         if timeout == Duration::ZERO {
@@ -105,7 +111,6 @@ impl<J: Job + Send + 'static, R: RecurringJob<J>> SourceManager<J, R> {
             }
             self.queue.enqueue(item);
         }
-        self.queue.drain_where(predicate)
     }
 
     /// get the timeout to wait for the queue based on the status of the recurring jobs
@@ -127,6 +132,18 @@ impl<J: Job + Send + 'static, R: RecurringJob<J>> SourceManager<J, R> {
     /// Gets access to the priority queue that this source uses, be careful with this `Mutex` as `get()` will also lock it.
     pub fn queue(&self) -> Arc<Mutex<PriorityQueue<PrioritisedJob<J>>>> {
         self.queue.queue()
+    }
+}
+
+impl<J: Job, R: RecurringJob<J> + Send + 'static> gaffer_runner::Loader<crate::runner::Task<J>>
+    for SourceManager<J, R>
+{
+    fn load(
+        &mut self,
+        idle: bool,
+        scheduler: &Mutex<dyn gaffer_runner::Scheduler<crate::runner::Task<J>>>,
+    ) {
+        self.process(idle)
     }
 }
 

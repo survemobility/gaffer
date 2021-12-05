@@ -71,8 +71,8 @@ impl<T: Job> Receiver<T> {
         &'s mut self,
         predicate: P,
     ) -> impl Iterator<Item = T> + 's {
-        PriorityQueue::drain_where_deref(self.queue.lock(), predicate)
-            .map(|PrioritisedJob(job)| job) // would be nice to map the predicate as well to remove the PrioritisedJob wrapper, but I'm struggling composing the functions
+        PriorityQueue::drain_where(self.queue.lock(), predicate).map(|PrioritisedJob(job)| job)
+        // todo would be nice to map the predicate as well to remove the PrioritisedJob wrapper, but I'm struggling composing the functions
     }
 
     pub fn enqueue(&self, item: T) {

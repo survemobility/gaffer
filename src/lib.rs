@@ -389,8 +389,6 @@
 #![warn(missing_docs)]
 #![warn(rust_2018_idioms)]
 
-use parking_lot::Mutex;
-
 use std::{
     fmt,
     sync::Arc,
@@ -434,7 +432,7 @@ impl<J> Clone for JobRunner<J> {
 
 /// Builder of [`JobRunner`]
 pub struct Builder<J: Job + 'static> {
-    concurrency_limit: Box<ConcurrencyLimitFn<J>>,
+    concurrency_limit: Arc<ConcurrencyLimitFn<J>>,
     recurring: Vec<Box<dyn RecurringJob<J> + Send>>,
     /// optional function to allow merging of jobs
     merge_fn: Option<fn(J, &mut J) -> MergeResult<J>>,
@@ -444,7 +442,7 @@ impl<J: Job + Send + 'static> Builder<J> {
     /// Start building a [`JobRunner`]
     fn new() -> Self {
         Builder {
-            concurrency_limit: Box::new(|_: <J as Job>::Priority| None as Option<u8>),
+            concurrency_limit: Arc::new(|_: <J as Job>::Priority| None as Option<u8>),
             recurring: vec![],
             merge_fn: None,
         }
@@ -481,7 +479,7 @@ impl<J: Job + Send + 'static> Builder<J> {
         mut self,
         concurrency_limit: impl Fn(<J as Job>::Priority) -> Option<u8> + Send + Sync + 'static,
     ) -> Self {
-        self.concurrency_limit = Box::new(concurrency_limit);
+        self.concurrency_limit = Arc::new(concurrency_limit);
         self
     }
 
@@ -492,14 +490,13 @@ impl<J: Job + Send + 'static> Builder<J> {
                 self.recurring,
                 self.merge_fn,
             );
-        let jobs = Arc::new(Mutex::new(sources));
-        let _threads = runner::spawn(thread_num, jobs, self.concurrency_limit);
+        let _threads = runner::spawn(thread_num, sources, self.concurrency_limit);
         JobRunner { sender }
     }
 }
 
 /// A job which can be executed by the runner, with features to synchronise jobs that would interfere with each other and reduce the parallelisation of low priority jobs
-pub trait Job: Send {
+pub trait Job: Send + 'static {
     /// Type used to check which jobs should not be allowed to run concurrently, see [`Job::exclusion()`]. Use [`NoExclusion`] for jobs which can always be run at the same time, see also [`ExclusionOption`].
     type Exclusion: PartialEq + Copy + fmt::Debug + Send;
 
@@ -518,7 +515,7 @@ pub trait Job: Send {
 
 impl<T> Job for T
 where
-    T: FnOnce() + Send,
+    T: FnOnce() + Send + 'static,
 {
     type Exclusion = NoExclusion;
 

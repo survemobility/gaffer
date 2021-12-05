@@ -74,16 +74,8 @@ impl<T: Prioritised> PriorityQueue<T> {
     }
 
     /// drains each element iterated, once the iterator is dropped, unlike `drain` implementations in the standard library, any remaining items are left in the queue
-    pub fn drain_where<P: FnMut(&T) -> bool>(
-        &mut self,
-        predicate: P,
-    ) -> DrainWhere<T, P, &mut Self> {
-        Self::drain_where_deref(self, predicate)
-    }
-
-    /// drains each element iterated, once the iterator is dropped, unlike `drain` implementations in the standard library, any remaining items are left in the queue
     /// This version allows different receiver types, so it can be called on eg `MutexGuard<Self>` and then take ownership of the guard
-    pub fn drain_where_deref<Q: DerefMut<Target = Self>, P: FnMut(&T) -> bool>(
+    pub fn drain_where<Q: DerefMut<Target = Self>, P: FnMut(&T) -> bool>(
         this: Q,
         predicate: P,
     ) -> DrainWhere<T, P, Q> {
@@ -95,16 +87,9 @@ impl<T: Prioritised> PriorityQueue<T> {
     }
 
     /// drains each element iterated, once the iterator is dropped, unlike `drain` implementations in the standard library, any remaining items are left in the queue
-    pub fn drain(&mut self) -> DrainWhere<T, impl FnMut(&T) -> bool, &mut Self> {
-        Self::drain_where_deref(self, |_| true)
-    }
-
-    /// drains each element iterated, once the iterator is dropped, unlike `drain` implementations in the standard library, any remaining items are left in the queue
     /// This version allows different receiver types, so it can be called on eg `MutexGuard<Self>` and then take ownership of the guard
-    pub fn drain_deref<Q: DerefMut<Target = Self>>(
-        this: Q,
-    ) -> DrainWhere<T, impl FnMut(&T) -> bool, Q> {
-        Self::drain_where_deref(this, |_| true)
+    pub fn drain<Q: DerefMut<Target = Self>>(this: Q) -> DrainWhere<T, impl FnMut(&T) -> bool, Q> {
+        Self::drain_where(this, |_| true)
     }
 
     pub fn is_empty(&self) -> bool {
