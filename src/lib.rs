@@ -380,7 +380,7 @@
 //!
 //!     fn execute(self) {
 //!         println!("Processing job {}", self.0);
-//!         std::thread::sleep(Duration::from_secs(1));
+//!         std::thread::sleep(Duration::from_millis(100));
 //!         self.1.fulfill(format!("Processed : [{}]", self.0));
 //!     }
 //! }
@@ -395,6 +395,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use gaffer_queue::PriorityQueue;
+use gaffer_runner::WorkerPool;
 use runner::ConcurrencyLimitFn;
 pub use source::RecurrableJob;
 use source::{IntervalRecurringJob, RecurringJob, SourceManager};
@@ -408,6 +410,7 @@ mod source;
 /// See crate level docs
 pub struct JobRunner<J> {
     sender: crossbeam_channel::Sender<J>,
+    threads: WorkerPool,
 }
 
 impl<J: Job + 'static> JobRunner<J> {
@@ -420,20 +423,17 @@ impl<J: Job + 'static> JobRunner<J> {
     pub fn send(&self, job: J) -> Result<(), crossbeam_channel::SendError<J>> {
         self.sender.send(job)
     }
-}
 
-impl<J> Clone for JobRunner<J> {
-    fn clone(&self) -> Self {
-        Self {
-            sender: self.sender.clone(),
-        }
+    /// Graciously stop the pool, workers will stop as they become idle, but won't stop until the currently available tasks are completed. Supervisor will keep loading tasks until it goes idle and stops. Returns immediately
+    pub fn stop(self) {
+        self.threads.stop()
     }
 }
 
 /// Builder of [`JobRunner`]
 pub struct Builder<J: Job + 'static> {
     concurrency_limit: Arc<ConcurrencyLimitFn<J>>,
-    recurring: Vec<Box<dyn RecurringJob<J> + Send>>,
+    recurring: Vec<Box<dyn RecurringJob<Job = J> + Send>>,
     /// optional function to allow merging of jobs
     merge_fn: Option<fn(J, &mut J) -> MergeResult<J>>,
 }
@@ -485,13 +485,13 @@ impl<J: Job + Send + 'static> Builder<J> {
 
     /// Build the [`JobRunner`], spawning `thread_num` threads as workers
     pub fn build(self, thread_num: usize) -> JobRunner<J> {
-        let (sender, sources) =
-            SourceManager::<J, Box<dyn RecurringJob<J> + Send>>::new_with_recurring(
-                self.recurring,
-                self.merge_fn,
-            );
-        let _threads = runner::spawn(thread_num, sources, self.concurrency_limit);
-        JobRunner { sender }
+        let queue = PriorityQueue::new();
+        let (sender, sources) = SourceManager::<J, Box<dyn RecurringJob<Job = J> + Send>>::new(
+            self.recurring,
+            self.merge_fn,
+        );
+        let threads = runner::spawn(thread_num, sources, queue, self.concurrency_limit);
+        JobRunner { sender, threads }
     }
 }
 

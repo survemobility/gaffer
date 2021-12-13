@@ -1,6 +1,6 @@
 use gaffer_queue::{Prioritised, PriorityQueue};
 use parking_lot::Mutex;
-use std::{fmt, sync::Arc, thread, time::Duration};
+use std::{borrow::BorrowMut, ops::DerefMut, thread, time::Duration};
 
 use crate::{Job, MergeResult};
 
@@ -16,29 +16,22 @@ impl<T: Job> Prioritised for PrioritisedJob<T> {
 }
 
 pub(crate) struct Receiver<T: Job> {
-    queue: Arc<Mutex<PriorityQueue<PrioritisedJob<T>>>>,
     recv: crossbeam_channel::Receiver<T>,
     merge_fn: Option<fn(T, &mut T) -> MergeResult<T>>,
 }
 
-impl<T: Job> fmt::Debug for Receiver<T>
-where
-    <T as Job>::Priority: fmt::Debug,
-    T: fmt::Debug,
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.queue.fmt(f)
-    }
-}
-
 impl<T: Job> Receiver<T> {
     /// Processes things currently ready in the queue without blocking
-    pub fn process_queue_ready(&mut self, mut cb: impl FnMut(&T)) -> bool {
+    pub fn process_queue_ready(
+        &mut self,
+        queue: &Mutex<dyn BorrowMut<PriorityQueue<PrioritisedJob<T>>>>,
+        mut cb: impl FnMut(&T),
+    ) -> bool {
         let mut has_new = false;
-        let mut queue = self.queue.lock();
+        let mut queue = queue.lock();
         for item in self.recv.try_iter() {
             cb(&item);
-            self.enqueue_locked(&mut queue, item);
+            self.enqueue_locked(queue.deref_mut().borrow_mut(), item);
             has_new = true;
         }
         has_new
@@ -47,16 +40,21 @@ impl<T: Job> Receiver<T> {
     /// Waits up to `timeout` for the first message, if none are currently available, if some are available (and `wait_for_new` is false) it returns immediately
     pub fn process_queue_timeout(
         &mut self,
+        queue: &Mutex<dyn BorrowMut<PriorityQueue<PrioritisedJob<T>>>>,
         timeout: Duration,
         wait_for_new: bool,
         mut cb: impl FnMut(&T),
     ) {
-        let has_new = self.process_queue_ready(&mut cb);
-        if !has_new && (wait_for_new || self.queue.lock().is_empty()) {
+        let has_new = self.process_queue_ready(queue, &mut cb);
+        if !has_new && (wait_for_new || queue.lock().deref_mut().borrow_mut().is_empty()) {
             match self.recv.recv_timeout(timeout) {
                 Ok(item) => {
                     cb(&item);
-                    self.queue.lock().enqueue(PrioritisedJob(item));
+                    queue
+                        .lock()
+                        .deref_mut()
+                        .borrow_mut()
+                        .enqueue(PrioritisedJob(item));
                 }
                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
@@ -64,19 +62,6 @@ impl<T: Job> Receiver<T> {
                 }
             }
         }
-    }
-
-    /// iterator over the currently available messages in priority order, any items not iterated when the iterator is dropped are left
-    pub fn drain_where<'s, 'p: 's, P: FnMut(&PrioritisedJob<T>) -> bool + 'p>(
-        &'s mut self,
-        predicate: P,
-    ) -> impl Iterator<Item = T> + 's {
-        PriorityQueue::drain_where(self.queue.lock(), predicate).map(|PrioritisedJob(job)| job)
-        // todo would be nice to map the predicate as well to remove the PrioritisedJob wrapper, but I'm struggling composing the functions
-    }
-
-    pub fn enqueue(&self, item: T) {
-        Self::enqueue_locked(self, &mut self.queue.lock(), item);
     }
 
     fn enqueue_locked(&self, queue: &mut PriorityQueue<PrioritisedJob<T>>, mut job: T) {
@@ -98,25 +83,13 @@ impl<T: Job> Receiver<T> {
         }
         queue.enqueue(PrioritisedJob(job));
     }
-
-    pub fn queue(&self) -> Arc<Mutex<PriorityQueue<PrioritisedJob<T>>>> {
-        self.queue.clone()
-    }
 }
 
-/// Produces an mpsc channel where, in the event that multiple jobs are already ready, they are produced in priority order
 pub(crate) fn channel<T: Job>(
     merge_fn: Option<fn(T, &mut T) -> MergeResult<T>>,
 ) -> (crossbeam_channel::Sender<T>, Receiver<T>) {
     let (send, recv) = crossbeam_channel::unbounded();
-    (
-        send,
-        Receiver {
-            queue: Arc::new(Mutex::new(PriorityQueue::new())),
-            recv,
-            merge_fn,
-        },
-    )
+    (send, Receiver { recv, merge_fn })
 }
 
 #[cfg(test)]
@@ -149,8 +122,12 @@ mod test {
     #[test]
     fn timeout_expires() {
         let (_send, mut recv) = channel::<Tester>(None);
-        recv.process_queue_timeout(Duration::from_micros(1), false, |_| {});
-        assert_eq!(recv.drain_where(|_| true).count(), 0);
+        let queue = Mutex::new(PriorityQueue::new());
+        recv.process_queue_timeout(&queue, Duration::from_micros(1), false, |_| {});
+        assert_eq!(
+            PriorityQueue::drain_where(queue.lock(), |_| true).count(),
+            0
+        );
     }
 
     #[test]
@@ -158,8 +135,15 @@ mod test {
         let (send, mut recv) = channel::<Tester>(None);
         send.send(Tester(0)).unwrap();
         let instant = Instant::now();
-        recv.process_queue_timeout(Duration::from_millis(1), false, |_| {});
-        assert_eq!(recv.drain_where(|_| true).next().unwrap(), Tester(0));
+        let queue = Mutex::new(PriorityQueue::new());
+        recv.process_queue_timeout(&queue, Duration::from_millis(1), false, |_| {});
+        assert_eq!(
+            PriorityQueue::drain_where(queue.lock(), |_| true)
+                .next()
+                .unwrap()
+                .0,
+            Tester(0)
+        );
         assert!(Instant::now().duration_since(instant) < Duration::from_millis(1));
     }
 
@@ -169,8 +153,11 @@ mod test {
         send.send(Tester(2)).unwrap();
         send.send(Tester(3)).unwrap();
         send.send(Tester(1)).unwrap();
-        recv.process_queue_timeout(Duration::from_millis(1), false, |_| {});
-        let items: Vec<_> = recv.drain_where(|_| true).collect();
+        let queue = Mutex::new(PriorityQueue::new());
+        recv.process_queue_timeout(&queue, Duration::from_millis(1), false, |_| {});
+        let items: Vec<_> = PriorityQueue::drain_where(queue.lock(), |_| true)
+            .map(|t| t.0)
+            .collect();
         assert_eq!(items, vec![Tester(3), Tester(2), Tester(1)]);
     }
 }

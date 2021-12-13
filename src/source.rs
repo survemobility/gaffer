@@ -1,25 +1,20 @@
 //! Handles job sources
 
-use gaffer_queue::PriorityQueue;
 use parking_lot::Mutex;
 use std::{
-    fmt,
     iter::Iterator,
     ops::{Deref, DerefMut},
-    sync::Arc,
     time::{Duration, Instant},
 };
 
-use crate::{Job, MergeResult};
-
-use self::prioritized_mpsc::PrioritisedJob;
+use crate::{runner::Supervisor, Job, MergeResult};
 
 pub(crate) mod prioritized_mpsc;
 
 /// Contains a prioritised queue of jobs, adding recurring jobs which should always be scheduled with some interval
 pub(crate) struct SourceManager<J: Job, R> {
-    queue: prioritized_mpsc::Receiver<J>,
     recurring: Vec<R>,
+    receiver: prioritized_mpsc::Receiver<J>,
 }
 
 #[cfg(test)]
@@ -34,83 +29,24 @@ impl<J: Job + Send + RecurrableJob + 'static> SourceManager<J, IntervalRecurring
     }
 }
 
-impl<J: Job, R> fmt::Debug for SourceManager<J, R>
+impl<J, R> SourceManager<J, R>
 where
-    <J as Job>::Priority: fmt::Debug,
-    J: fmt::Debug,
+    J: Job + Send + 'static,
+    R: RecurringJob<Job = J>,
 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.queue.fmt(f)
-    }
-}
-
-impl<J: Job + Send + 'static, R: RecurringJob<J>> SourceManager<J, R> {
-    #[cfg(test)]
-    /// Create a new `(Sender, SourceManager<>)` pair
-    pub fn new() -> (crossbeam_channel::Sender<J>, SourceManager<J, R>) {
-        let (send, recv) = prioritized_mpsc::channel(None);
-        (
-            send,
-            SourceManager {
-                queue: recv,
-                recurring: vec![],
-            },
-        )
-    }
-
     /// Create a new `(Sender, SourceManager<>)` pair with the provided recurring jobs
-    pub fn new_with_recurring(
+    pub fn new(
         recurring: Vec<R>,
         merge_fn: Option<fn(J, &mut J) -> MergeResult<J>>,
-    ) -> (crossbeam_channel::Sender<J>, SourceManager<J, R>) {
-        let (send, recv) = prioritized_mpsc::channel(merge_fn);
+    ) -> (crossbeam_channel::Sender<J>, Self) {
+        let (send, receiver) = prioritized_mpsc::channel::<J>(merge_fn);
         (
             send,
-            SourceManager {
-                queue: recv,
+            Self {
                 recurring,
+                receiver,
             },
         )
-    }
-
-    #[cfg(test)]
-    pub fn get<'s, 'p: 's, P: for<'j> FnMut(&'j PrioritisedJob<J>) -> bool + 'p>(
-        &'s mut self,
-        wait_for_new: bool,
-        predicate: P,
-    ) -> impl Iterator<Item = J> + 's {
-        self.process(wait_for_new);
-        self.queue.drain_where(predicate)
-    }
-
-    /// Get the next batch of prioritised jobs
-    ///
-    /// Maximum wait duration would be the longest interval of all of the recurring jobs, or an arbitrary timeout. It could return immediately. It could return with no jobs. The caller should only iterate as many jobs as it can execute, the iterator should be dropped without iterating the rest.
-    ///
-    /// wait_for_new: if set, only returns immedaitely if there are new jobs inthe queue
-    pub fn process(&mut self, wait_for_new: bool) {
-        let timeout = self.queue_timeout();
-        let recurring = &mut self.recurring;
-        if timeout == Duration::ZERO {
-            self.queue.process_queue_ready(|new_enqueue| {
-                for recurring in recurring.iter_mut() {
-                    recurring.job_enqueued(new_enqueue);
-                }
-            });
-        } else {
-            self.queue
-                .process_queue_timeout(timeout, wait_for_new, |new_enqueue| {
-                    for recurring in recurring.iter_mut() {
-                        recurring.job_enqueued(new_enqueue);
-                    }
-                });
-        }
-        for item in self.recurring.iter().flat_map(R::get).collect::<Vec<_>>() {
-            for recurring in &mut self.recurring {
-                recurring.job_enqueued(&item);
-            }
-            self.queue.enqueue(item);
-        }
     }
 
     /// get the timeout to wait for the queue based on the status of the recurring jobs
@@ -128,36 +64,60 @@ impl<J: Job + Send + 'static, R: RecurringJob<J>> SourceManager<J, R> {
     fn soonest_recurring(&self) -> Option<Instant> {
         self.recurring.iter().map(R::max_sleep).min()
     }
-
-    /// Gets access to the priority queue that this source uses, be careful with this `Mutex` as `get()` will also lock it.
-    pub fn queue(&self) -> Arc<Mutex<PriorityQueue<PrioritisedJob<J>>>> {
-        self.queue.queue()
-    }
 }
 
-impl<J: Job, R: RecurringJob<J> + Send + 'static> gaffer_runner::Loader<crate::runner::Task<J>>
-    for SourceManager<J, R>
+impl<J: Job, R: RecurringJob<Job = J> + Send + 'static>
+    gaffer_runner::Loader<crate::runner::Task<J>> for SourceManager<J, R>
 {
-    fn load(
-        &mut self,
-        idle: bool,
-        scheduler: &Mutex<dyn gaffer_runner::Scheduler<crate::runner::Task<J>>>,
-    ) {
-        self.process(idle)
+    type Scheduler = Supervisor<J>;
+
+    /// Get the next batch of prioritised jobs
+    ///
+    /// Maximum wait duration would be the longest interval of all of the recurring jobs, or an arbitrary timeout. It could return immediately. It could return with no jobs. The caller should only iterate as many jobs as it can execute, the iterator should be dropped without iterating the rest.
+    ///
+    /// wait_for_new: if set, only returns immedaitely if there are new jobs inthe queue
+    fn load(&mut self, wait_for_new: bool, scheduler: &Mutex<Self::Scheduler>) {
+        let timeout = self.queue_timeout();
+        let recurring = &mut self.recurring;
+        if timeout == Duration::ZERO {
+            self.receiver.process_queue_ready(scheduler, |new_enqueue| {
+                for recurring in recurring.iter_mut() {
+                    recurring.job_enqueued(new_enqueue);
+                }
+            });
+        } else {
+            self.receiver
+                .process_queue_timeout(scheduler, timeout, wait_for_new, |new_enqueue| {
+                    // FIXME can't lock the scheduler while blocking on process queue, maybe the other locks need to be done better too
+                    for recurring in recurring.iter_mut() {
+                        recurring.job_enqueued(new_enqueue);
+                    }
+                });
+        }
+        for item in self.recurring.iter().flat_map(R::get).collect::<Vec<_>>() {
+            for recurring in &mut self.recurring {
+                recurring.job_enqueued(&item);
+            }
+            scheduler.lock().enqueue(item);
+        }
     }
 }
 
 /// Defines how a job recurs
-pub trait RecurringJob<J> {
+pub trait RecurringJob {
+    type Job;
+
     /// Get the job if it is ready to recur
-    fn get(&self) -> Option<J>;
+    fn get(&self) -> Option<Self::Job>;
     /// Notifies the recurring job about any job that has ben enqueued so that it can push back it's next occurance
-    fn job_enqueued(&mut self, job: &J);
+    fn job_enqueued(&mut self, job: &Self::Job);
     /// Returns the latest `Instant` that the caller could sleep until before it should call `get()` again
     fn max_sleep(&self) -> Instant;
 }
 
-impl<J> RecurringJob<J> for Box<dyn RecurringJob<J> + Send> {
+impl<J> RecurringJob for Box<dyn RecurringJob<Job = J> + Send> {
+    type Job = J;
+
     fn get(&self) -> Option<J> {
         self.deref().get()
     }
@@ -184,7 +144,9 @@ pub struct IntervalRecurringJob<J: RecurrableJob> {
     pub(crate) job: J,
 }
 
-impl<J: RecurrableJob> RecurringJob<J> for IntervalRecurringJob<J> {
+impl<J: RecurrableJob> RecurringJob for IntervalRecurringJob<J> {
+    type Job = J;
+
     fn get(&self) -> Option<J> {
         if Instant::now() > self.last_enqueue + self.interval {
             Some(self.job.clone())
@@ -207,7 +169,9 @@ impl<J: RecurrableJob> RecurringJob<J> for IntervalRecurringJob<J> {
 /// Just until the never type is stable, this represents that the job does not recur
 enum NeverRecur {}
 
-impl<J> RecurringJob<J> for NeverRecur {
+impl<J> RecurringJob for (NeverRecur, J) {
+    type Job = J;
+
     fn get(&self) -> Option<J> {
         unreachable!()
     }
@@ -229,6 +193,11 @@ mod test {
         time::Duration,
     };
 
+    use gaffer_queue::PriorityQueue;
+    use gaffer_runner::{Loader, Scheduler};
+
+    use crate::runner::Task;
+
     use super::*;
 
     #[derive(Debug, Clone, PartialEq)]
@@ -243,9 +212,7 @@ mod test {
 
         type Exclusion = ();
 
-        fn exclusion(&self) -> Self::Exclusion {
-            todo!()
-        }
+        fn exclusion(&self) -> Self::Exclusion {}
 
         fn execute(self) {
             todo!()
@@ -260,26 +227,38 @@ mod test {
 
     #[test]
     fn priority_queue() {
-        let (send, mut manager) = SourceManager::<_, NeverRecur>::new();
+        // TODO nothing to do with source manage anymore
+        let queue = Mutex::new(PriorityQueue::new());
+        let (send, mut recv) = prioritized_mpsc::channel(None);
         send.send(Tester(2)).unwrap();
         send.send(Tester(3)).unwrap();
         send.send(Tester(1)).unwrap();
+        recv.process_queue_ready(&queue, |_| ());
         assert_eq!(
-            manager.get(false, |_| true).collect::<Vec<_>>(),
+            PriorityQueue::drain_where(queue.lock(), |_| true)
+                .map(|t| t.0)
+                .collect::<Vec<_>>(),
             vec![Tester(3), Tester(2), Tester(1)]
         )
     }
 
     #[test]
     fn recurring_ready() {
-        let (_send, mut manager) = SourceManager::new();
+        let scheduler = Mutex::new(Supervisor::new());
+        let (_send, mut manager) = SourceManager::new(vec![], None);
         let one_min_ago = Instant::now() - Duration::from_secs(60);
         manager.set_recurring(Duration::from_secs(1), one_min_ago, Tester(1));
         manager.set_recurring(Duration::from_secs(1), one_min_ago, Tester(2));
         manager.set_recurring(Duration::from_secs(1), one_min_ago, Tester(3));
         let before = Instant::now();
+        manager.load(false, &scheduler); // need to do this on the other tests to make them work,
         assert_eq!(
-            manager.get(false, |_| true).collect::<Vec<_>>(),
+            scheduler
+                .into_inner()
+                .steal(&[None, None, None], 3)
+                .into_iter()
+                .map(|Task(t)| t)
+                .collect::<Vec<_>>(),
             vec![Tester(3), Tester(2), Tester(1)]
         );
         assert!(Instant::now().duration_since(before) < Duration::from_millis(1));
@@ -287,18 +266,31 @@ mod test {
 
     #[test]
     fn recurring_interval() {
-        let (_send, mut manager) = SourceManager::new();
+        let scheduler = Mutex::new(Supervisor::new());
+        let (_send, mut manager) = SourceManager::new(vec![], None);
         let one_min_ago = Instant::now() - Duration::from_secs(60);
         manager.set_recurring(Duration::from_millis(1), one_min_ago, Tester(1));
         manager.set_recurring(Duration::from_millis(1), one_min_ago, Tester(2));
         manager.set_recurring(Duration::from_millis(1), one_min_ago, Tester(3));
+        manager.load(false, &scheduler); // need to do this on the other tests to make them work,
         assert_eq!(
-            manager.get(false, |_| true).collect::<Vec<_>>(),
+            scheduler
+                .lock()
+                .steal(&[None, None, None], 3)
+                .into_iter()
+                .map(|Task(t)| t)
+                .collect::<Vec<_>>(),
             vec![Tester(3), Tester(2), Tester(1)]
         );
         let before = Instant::now();
+        manager.load(false, &scheduler);
         assert_eq!(
-            manager.get(false, |_| true).collect::<Vec<_>>(),
+            scheduler
+                .lock()
+                .steal(&[None, None, None], 3)
+                .into_iter()
+                .map(|Task(t)| t)
+                .collect::<Vec<_>>(),
             vec![Tester(3), Tester(2), Tester(1)]
         );
         assert!(
@@ -310,58 +302,97 @@ mod test {
 
     #[test]
     fn recurring_not_duplicated() {
-        let (_send, mut manager) = SourceManager::new();
+        let scheduler = Mutex::new(Supervisor::new());
+        let (_send, mut manager) = SourceManager::new(vec![], None);
         let one_min_ago = Instant::now() - Duration::from_secs(60);
         manager.set_recurring(Duration::from_millis(1), one_min_ago, Tester(1));
         manager.set_recurring(Duration::from_millis(1), one_min_ago, Tester(2));
         manager.set_recurring(Duration::from_millis(1), one_min_ago, Tester(3));
+        manager.load(false, &scheduler);
         assert_eq!(
-            manager.get(false, |_| true).take(1).collect::<Vec<_>>(),
+            scheduler
+                .lock()
+                .steal(&[None, None, None], 1)
+                .into_iter()
+                .map(|Task(t)| t)
+                .collect::<Vec<_>>(),
             vec![Tester(3)]
         );
+        manager.load(false, &scheduler);
         assert_eq!(
-            manager.get(false, |_| true).collect::<Vec<_>>(),
+            scheduler
+                .lock()
+                .steal(&[None, None, None], 3)
+                .into_iter()
+                .map(|Task(t)| t)
+                .collect::<Vec<_>>(),
             vec![Tester(2), Tester(1)]
         );
     }
 
     #[test]
     fn queued_resets_recurring() {
-        let (send, mut manager) = SourceManager::new();
+        let scheduler = Mutex::new(Supervisor::new());
+        let (send, mut manager) = SourceManager::new(vec![], None);
         let start = Instant::now();
         let half_interval_ago = start - Duration::from_millis(5);
         manager.set_recurring(Duration::from_millis(10), half_interval_ago, Tester(1));
         manager.set_recurring(Duration::from_millis(10), half_interval_ago, Tester(2));
         manager.set_recurring(Duration::from_millis(10), half_interval_ago, Tester(3));
         send.send(Tester(2)).unwrap();
+        manager.load(false, &scheduler);
         assert_eq!(
-            manager.get(false, |_| true).collect::<Vec<_>>(),
+            scheduler
+                .lock()
+                .steal(&[None, None, None], 3)
+                .into_iter()
+                .map(|Task(t)| t)
+                .collect::<Vec<_>>(),
             vec![Tester(2)],
             "Wrong result after {:?}",
             Instant::now().duration_since(start)
         );
         let restart = Instant::now();
+        manager.load(false, &scheduler);
         assert_eq!(
-            manager.get(false, |_| true).collect::<Vec<_>>(),
+            scheduler
+                .lock()
+                .steal(&[None, None, None], 3)
+                .into_iter()
+                .map(|Task(t)| t)
+                .collect::<Vec<_>>(),
             vec![Tester(3), Tester(1)],
             "Wrong result after {:?}",
             Instant::now().duration_since(restart)
         );
+        manager.load(false, &scheduler);
         assert_eq!(
-            manager.get(false, |_| true).collect::<Vec<_>>(),
+            scheduler
+                .lock()
+                .steal(&[None, None, None], 3)
+                .into_iter()
+                .map(|Task(t)| t)
+                .collect::<Vec<_>>(),
             vec![Tester(2)]
         );
     }
 
     #[test]
     fn queue_received_during_poll_wait() {
-        let (send, mut manager) = SourceManager::new();
+        let scheduler = Mutex::new(Supervisor::new());
+        let (send, mut manager) = SourceManager::new(vec![], None);
         let now = Instant::now();
         manager.set_recurring(Duration::from_millis(1), now, Tester(1));
         manager.set_recurring(Duration::from_millis(1), now, Tester(3));
         send.send(Tester(2)).unwrap();
+        manager.load(false, &scheduler);
         assert_eq!(
-            manager.get(false, |_| true).collect::<Vec<_>>(),
+            scheduler
+                .lock()
+                .steal(&[None, None, None], 3)
+                .into_iter()
+                .map(|Task(t)| t)
+                .collect::<Vec<_>>(),
             vec![Tester(2)],
             "Wrong result after {:?}",
             Instant::now().duration_since(now)
@@ -370,20 +401,28 @@ mod test {
 
     #[test]
     fn priority_order_queue_and_recurring() {
-        let (send, mut manager) = SourceManager::new();
+        let scheduler = Mutex::new(Supervisor::new());
+        let (send, mut manager) = SourceManager::new(vec![], None);
         let one_min_ago = Instant::now() - Duration::from_secs(60);
         manager.set_recurring(Duration::from_millis(1), one_min_ago, Tester(1));
         manager.set_recurring(Duration::from_millis(1), one_min_ago, Tester(3));
         send.send(Tester(2)).unwrap();
+        manager.load(false, &scheduler);
         assert_eq!(
-            manager.get(false, |_| true).collect::<Vec<_>>(),
+            scheduler
+                .lock()
+                .steal(&[None, None, None], 3)
+                .into_iter()
+                .map(|Task(t)| t)
+                .collect::<Vec<_>>(),
             vec![Tester(3), Tester(2), Tester(1)]
         );
     }
 
     #[test]
     fn queue_not_awaited_with_ready_recurring() {
-        let (send, mut manager) = SourceManager::new();
+        let scheduler = Mutex::new(Supervisor::new());
+        let (send, mut manager) = SourceManager::new(vec![], None);
         let one_min_ago = Instant::now() - Duration::from_secs(60);
         manager.set_recurring(Duration::from_secs(1), one_min_ago, Tester(1));
         manager.set_recurring(Duration::from_secs(1), one_min_ago, Tester(2));
@@ -397,8 +436,14 @@ mod test {
         });
         b2.wait();
         let before = Instant::now();
+        manager.load(false, &scheduler);
         assert_eq!(
-            manager.get(false, |_| true).collect::<Vec<_>>(),
+            scheduler
+                .lock()
+                .steal(&[None, None, None], 3)
+                .into_iter()
+                .map(|Task(t)| t)
+                .collect::<Vec<_>>(),
             vec![Tester(3), Tester(2), Tester(1)]
         );
         assert!(Instant::now().duration_since(before) < Duration::from_millis(1));
