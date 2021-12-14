@@ -97,7 +97,7 @@ pub trait Scheduler<T: Task>: Send + 'static {
 pub trait Loader<T: Task>: Send + 'static {
     type Scheduler: Scheduler<T>;
 
-    fn load(&mut self, idle: bool, scheduler: &Mutex<Self::Scheduler>); // maybe idle can be removed
+    fn load(&mut self, idle: bool, scheduler: MutexGuard<'_, Self::Scheduler>); // maybe idle can be removed
 }
 
 struct Runner<T, S, L>
@@ -194,7 +194,7 @@ where
         let mut idle = false;
         loop {
             log::trace!("Loading jobs");
-            self.loader.lock().load(idle, &*self.scheduler);
+            self.loader.lock().load(idle, self.scheduler.lock());
             log::trace!("Loaded jobs");
             if let Some(task) = self.state.assign_jobs(&*self.scheduler) {
                 return Some(task);
@@ -752,7 +752,7 @@ mod runner_test {
     impl Loader<ExcludedJob> for Load {
         type Scheduler = Super;
 
-        fn load(&mut self, _idle: bool, _scheduler: &Mutex<Super>) {
+        fn load(&mut self, _idle: bool, _scheduler: MutexGuard<Super>) {
             thread::sleep(Duration::from_millis(1))
         }
     }

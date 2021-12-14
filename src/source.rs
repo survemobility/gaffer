@@ -1,7 +1,8 @@
 //! Handles job sources
 
-use parking_lot::Mutex;
+use parking_lot::MutexGuard;
 use std::{
+    borrow::BorrowMut,
     iter::Iterator,
     ops::{Deref, DerefMut},
     time::{Duration, Instant},
@@ -76,29 +77,33 @@ impl<J: Job, R: RecurringJob<Job = J> + Send + 'static>
     /// Maximum wait duration would be the longest interval of all of the recurring jobs, or an arbitrary timeout. It could return immediately. It could return with no jobs. The caller should only iterate as many jobs as it can execute, the iterator should be dropped without iterating the rest.
     ///
     /// wait_for_new: if set, only returns immedaitely if there are new jobs inthe queue
-    fn load(&mut self, wait_for_new: bool, scheduler: &Mutex<Self::Scheduler>) {
+    fn load(&mut self, wait_for_new: bool, mut scheduler: MutexGuard<'_, Self::Scheduler>) {
         let timeout = self.queue_timeout();
         let recurring = &mut self.recurring;
         if timeout == Duration::ZERO {
-            self.receiver.process_queue_ready(scheduler, |new_enqueue| {
-                for recurring in recurring.iter_mut() {
-                    recurring.job_enqueued(new_enqueue);
-                }
-            });
-        } else {
             self.receiver
-                .process_queue_timeout(scheduler, timeout, wait_for_new, |new_enqueue| {
-                    // FIXME can't lock the scheduler while blocking on process queue, maybe the other locks need to be done better too
+                .process_queue_ready(scheduler.deref_mut().borrow_mut(), |new_enqueue| {
                     for recurring in recurring.iter_mut() {
                         recurring.job_enqueued(new_enqueue);
                     }
                 });
+        } else {
+            self.receiver.process_queue_timeout(
+                &mut scheduler,
+                timeout,
+                wait_for_new,
+                |new_enqueue| {
+                    for recurring in recurring.iter_mut() {
+                        recurring.job_enqueued(new_enqueue);
+                    }
+                },
+            );
         }
         for item in self.recurring.iter().flat_map(R::get).collect::<Vec<_>>() {
             for recurring in &mut self.recurring {
                 recurring.job_enqueued(&item);
             }
-            scheduler.lock().enqueue(item);
+            scheduler.enqueue(item);
         }
     }
 }
@@ -195,6 +200,7 @@ mod test {
 
     use gaffer_queue::PriorityQueue;
     use gaffer_runner::{Loader, Scheduler};
+    use parking_lot::Mutex;
 
     use crate::runner::Task;
 
@@ -228,14 +234,14 @@ mod test {
     #[test]
     fn priority_queue() {
         // TODO nothing to do with source manage anymore
-        let queue = Mutex::new(PriorityQueue::new());
+        let mut queue = PriorityQueue::new();
         let (send, mut recv) = prioritized_mpsc::channel(None);
         send.send(Tester(2)).unwrap();
         send.send(Tester(3)).unwrap();
         send.send(Tester(1)).unwrap();
-        recv.process_queue_ready(&queue, |_| ());
+        recv.process_queue_ready(&mut queue, |_| ());
         assert_eq!(
-            PriorityQueue::drain_where(queue.lock(), |_| true)
+            PriorityQueue::drain_where(&mut queue, |_| true)
                 .map(|t| t.0)
                 .collect::<Vec<_>>(),
             vec![Tester(3), Tester(2), Tester(1)]
@@ -251,7 +257,7 @@ mod test {
         manager.set_recurring(Duration::from_secs(1), one_min_ago, Tester(2));
         manager.set_recurring(Duration::from_secs(1), one_min_ago, Tester(3));
         let before = Instant::now();
-        manager.load(false, &scheduler); // need to do this on the other tests to make them work,
+        manager.load(false, scheduler.lock()); // need to do this on the other tests to make them work,
         assert_eq!(
             scheduler
                 .into_inner()
@@ -272,7 +278,7 @@ mod test {
         manager.set_recurring(Duration::from_millis(1), one_min_ago, Tester(1));
         manager.set_recurring(Duration::from_millis(1), one_min_ago, Tester(2));
         manager.set_recurring(Duration::from_millis(1), one_min_ago, Tester(3));
-        manager.load(false, &scheduler); // need to do this on the other tests to make them work,
+        manager.load(false, scheduler.lock()); // need to do this on the other tests to make them work,
         assert_eq!(
             scheduler
                 .lock()
@@ -283,7 +289,7 @@ mod test {
             vec![Tester(3), Tester(2), Tester(1)]
         );
         let before = Instant::now();
-        manager.load(false, &scheduler);
+        manager.load(false, scheduler.lock());
         assert_eq!(
             scheduler
                 .lock()
@@ -308,7 +314,7 @@ mod test {
         manager.set_recurring(Duration::from_millis(1), one_min_ago, Tester(1));
         manager.set_recurring(Duration::from_millis(1), one_min_ago, Tester(2));
         manager.set_recurring(Duration::from_millis(1), one_min_ago, Tester(3));
-        manager.load(false, &scheduler);
+        manager.load(false, scheduler.lock());
         assert_eq!(
             scheduler
                 .lock()
@@ -318,7 +324,7 @@ mod test {
                 .collect::<Vec<_>>(),
             vec![Tester(3)]
         );
-        manager.load(false, &scheduler);
+        manager.load(false, scheduler.lock());
         assert_eq!(
             scheduler
                 .lock()
@@ -340,7 +346,7 @@ mod test {
         manager.set_recurring(Duration::from_millis(10), half_interval_ago, Tester(2));
         manager.set_recurring(Duration::from_millis(10), half_interval_ago, Tester(3));
         send.send(Tester(2)).unwrap();
-        manager.load(false, &scheduler);
+        manager.load(false, scheduler.lock());
         assert_eq!(
             scheduler
                 .lock()
@@ -353,7 +359,7 @@ mod test {
             Instant::now().duration_since(start)
         );
         let restart = Instant::now();
-        manager.load(false, &scheduler);
+        manager.load(false, scheduler.lock());
         assert_eq!(
             scheduler
                 .lock()
@@ -365,7 +371,7 @@ mod test {
             "Wrong result after {:?}",
             Instant::now().duration_since(restart)
         );
-        manager.load(false, &scheduler);
+        manager.load(false, scheduler.lock());
         assert_eq!(
             scheduler
                 .lock()
@@ -385,7 +391,7 @@ mod test {
         manager.set_recurring(Duration::from_millis(1), now, Tester(1));
         manager.set_recurring(Duration::from_millis(1), now, Tester(3));
         send.send(Tester(2)).unwrap();
-        manager.load(false, &scheduler);
+        manager.load(false, scheduler.lock());
         assert_eq!(
             scheduler
                 .lock()
@@ -407,7 +413,7 @@ mod test {
         manager.set_recurring(Duration::from_millis(1), one_min_ago, Tester(1));
         manager.set_recurring(Duration::from_millis(1), one_min_ago, Tester(3));
         send.send(Tester(2)).unwrap();
-        manager.load(false, &scheduler);
+        manager.load(false, scheduler.lock());
         assert_eq!(
             scheduler
                 .lock()
@@ -436,7 +442,7 @@ mod test {
         });
         b2.wait();
         let before = Instant::now();
-        manager.load(false, &scheduler);
+        manager.load(false, scheduler.lock());
         assert_eq!(
             scheduler
                 .lock()

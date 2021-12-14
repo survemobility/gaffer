@@ -1,5 +1,5 @@
 use gaffer_queue::{Prioritised, PriorityQueue};
-use parking_lot::Mutex;
+use parking_lot::MutexGuard;
 use std::{borrow::BorrowMut, ops::DerefMut, thread, time::Duration};
 
 use crate::{Job, MergeResult};
@@ -24,41 +24,37 @@ impl<T: Job> Receiver<T> {
     /// Processes things currently ready in the queue without blocking
     pub fn process_queue_ready(
         &mut self,
-        queue: &Mutex<dyn BorrowMut<PriorityQueue<PrioritisedJob<T>>>>,
+        queue: &mut PriorityQueue<PrioritisedJob<T>>,
         mut cb: impl FnMut(&T),
     ) -> bool {
         let mut has_new = false;
-        let mut queue = queue.lock();
         for item in self.recv.try_iter() {
             cb(&item);
-            self.enqueue_locked(queue.deref_mut().borrow_mut(), item);
+            self.enqueue_locked(queue, item);
             has_new = true;
         }
         has_new
     }
 
     /// Waits up to `timeout` for the first message, if none are currently available, if some are available (and `wait_for_new` is false) it returns immediately
-    pub fn process_queue_timeout(
+    pub fn process_queue_timeout<'a, Q: BorrowMut<PriorityQueue<PrioritisedJob<T>>>>(
         &mut self,
-        queue: &Mutex<dyn BorrowMut<PriorityQueue<PrioritisedJob<T>>>>,
+        queue: &mut MutexGuard<'a, Q>,
         timeout: Duration,
         wait_for_new: bool,
         mut cb: impl FnMut(&T),
     ) {
-        let has_new = self.process_queue_ready(queue, &mut cb);
-        if !has_new && (wait_for_new || queue.lock().deref_mut().borrow_mut().is_empty()) {
-            match self.recv.recv_timeout(timeout) {
+        let has_new = self.process_queue_ready(queue.deref_mut().borrow_mut(), &mut cb);
+        if !has_new && (wait_for_new || queue.deref_mut().borrow_mut().is_empty()) {
+            let recv_result = MutexGuard::unlocked(queue, || self.recv.recv_timeout(timeout));
+            match recv_result {
                 Ok(item) => {
                     cb(&item);
-                    queue
-                        .lock()
-                        .deref_mut()
-                        .borrow_mut()
-                        .enqueue(PrioritisedJob(item));
+                    queue.deref_mut().borrow_mut().enqueue(PrioritisedJob(item));
                 }
                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
-                    thread::sleep(timeout);
+                    MutexGuard::unlocked(queue, || thread::sleep(timeout));
                 }
             }
         }
@@ -96,6 +92,8 @@ pub(crate) fn channel<T: Job>(
 mod test {
     use std::time::{Duration, Instant};
 
+    use parking_lot::Mutex;
+
     use super::*;
 
     #[derive(Debug, PartialEq, Eq)]
@@ -123,7 +121,7 @@ mod test {
     fn timeout_expires() {
         let (_send, mut recv) = channel::<Tester>(None);
         let queue = Mutex::new(PriorityQueue::new());
-        recv.process_queue_timeout(&queue, Duration::from_micros(1), false, |_| {});
+        recv.process_queue_timeout(&mut queue.lock(), Duration::from_micros(1), false, |_| {});
         assert_eq!(
             PriorityQueue::drain_where(queue.lock(), |_| true).count(),
             0
@@ -136,7 +134,7 @@ mod test {
         send.send(Tester(0)).unwrap();
         let instant = Instant::now();
         let queue = Mutex::new(PriorityQueue::new());
-        recv.process_queue_timeout(&queue, Duration::from_millis(1), false, |_| {});
+        recv.process_queue_timeout(&mut queue.lock(), Duration::from_millis(1), false, |_| {});
         assert_eq!(
             PriorityQueue::drain_where(queue.lock(), |_| true)
                 .next()
@@ -154,7 +152,7 @@ mod test {
         send.send(Tester(3)).unwrap();
         send.send(Tester(1)).unwrap();
         let queue = Mutex::new(PriorityQueue::new());
-        recv.process_queue_timeout(&queue, Duration::from_millis(1), false, |_| {});
+        recv.process_queue_timeout(&mut queue.lock(), Duration::from_millis(1), false, |_| {});
         let items: Vec<_> = PriorityQueue::drain_where(queue.lock(), |_| true)
             .map(|t| t.0)
             .collect();
