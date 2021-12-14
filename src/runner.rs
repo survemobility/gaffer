@@ -7,7 +7,7 @@ use gaffer_queue::PriorityQueue;
 use gaffer_runner::WorkerPool;
 
 use crate::{
-    source::{prioritized_mpsc::PrioritisedJob, RecurringJob, SourceManager},
+    source::{PrioritisedJob, RecurringJob, SourceManager},
     Job,
 };
 
