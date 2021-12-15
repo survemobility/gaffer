@@ -307,9 +307,7 @@ mod test {
 
         fn exclusion(&self) -> Self::Exclusion {}
 
-        fn execute(self) {
-            todo!()
-        }
+        fn execute(self) {}
     }
 
     impl RecurrableJob for Tester {
@@ -562,13 +560,9 @@ mod test2 {
 
         type Exclusion = ();
 
-        fn exclusion(&self) -> Self::Exclusion {
-            todo!()
-        }
+        fn exclusion(&self) -> Self::Exclusion {}
 
-        fn execute(self) {
-            todo!()
-        }
+        fn execute(self) {}
     }
 
     #[test]

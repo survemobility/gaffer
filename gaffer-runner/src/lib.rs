@@ -150,7 +150,7 @@ where
                 .expect("Available worker is not connected to shared runner state")
             {
                 WorkerInstruction::Assign(task) => Some(task),
-                WorkerInstruction::BecomeSupervisor => self.run_supervisor(), // todo put this on the enum
+                WorkerInstruction::BecomeSupervisor => self.run_supervisor(),
             }
         };
         drop(recv);
@@ -745,7 +745,7 @@ mod runner_test {
         }
 
         fn requeue(&mut self, _task: ExcludedJob) {
-            todo!()
+            unreachable!()
         }
     }
 
