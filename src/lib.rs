@@ -408,9 +408,10 @@ mod source;
 /// Top level structure of the crate. Once dropped the pool will stop workers as they become idle, but won't stop until the currently available tasks are completed. Supervisor will keep loading tasks until it goes idle and stops.
 ///
 /// See crate level docs
+#[derive(Clone)]
 pub struct JobRunner<J> {
     sender: crossbeam_channel::Sender<J>,
-    _pool: WorkerPool,
+    _pool: Arc<WorkerPool>,
 }
 
 impl<J: Job + 'static> JobRunner<J> {
@@ -488,7 +489,7 @@ impl<J: Job + Send + 'static> Builder<J> {
         let pool = runner::spawn(thread_num, sources, queue, self.concurrency_limit);
         JobRunner {
             sender,
-            _pool: pool,
+            _pool: Arc::new(pool),
         }
     }
 }
