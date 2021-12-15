@@ -12,7 +12,10 @@ use std::{
 
 use crate::{runner::Supervisor, Job, MergeResult};
 
-/// Contains a prioritised queue of jobs, adding recurring jobs which should always be scheduled with some interval
+/// Manages sources of jobs for a runner, including:
+/// * reading jobs from a channel and waiting on the channel
+/// * scheduling recurring jobs after timeouts have passed
+/// * merging jobs into the `PriorityQueue`
 pub(crate) struct SourceManager<J: Job, R> {
     recurring: Vec<R>,
     receiver: Receiver<J>,
@@ -142,7 +145,7 @@ pub trait RecurrableJob: Clone {
     fn matches(&self, other: &Self) -> bool;
 }
 
-/// Recurring job which works by updating the last time a job was enqueued reenqueueing after some interval
+/// Recurring job which works by recording the last time a job was enqueued and reenqueueing after some interval
 pub struct IntervalRecurringJob<J: RecurrableJob> {
     pub(crate) last_enqueue: Instant,
     pub(crate) interval: Duration,

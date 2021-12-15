@@ -212,7 +212,7 @@ mod runner_test {
         let events = Arc::new(Mutex::new(vec![]));
         let (sender, sources) =
             SourceManager::<_, Box<dyn RecurringJob<Job = ExcludedJob> + Send>>::new(vec![], None);
-        let threads = spawn(2, sources, queue, Arc::new(|()| None));
+        let pool = spawn(2, sources, queue, Arc::new(|()| None));
 
         thread::sleep(Duration::from_millis(10));
         sender.send(ExcludedJob(1, events.clone())).unwrap();
@@ -221,7 +221,7 @@ mod runner_test {
         sender.send(ExcludedJob(2, events.clone())).unwrap();
 
         thread::sleep(Duration::from_millis(100));
-        threads.stop();
+        drop(pool);
         assert_eq!(
             *events.lock(),
             vec![
@@ -245,7 +245,7 @@ mod runner_test {
             _,
             Box<dyn RecurringJob<Job = PrioritisedJob> + Send>,
         >::new(vec![], None);
-        let threads = spawn(2, sources, queue, Arc::new(|priority| Some(priority)));
+        let pool = spawn(2, sources, queue, Arc::new(|priority| Some(priority)));
 
         thread::sleep(Duration::from_millis(10));
         sender.send(PrioritisedJob(1, events.clone())).unwrap();
@@ -254,7 +254,7 @@ mod runner_test {
         sender.send(PrioritisedJob(2, events.clone())).unwrap();
 
         thread::sleep(Duration::from_millis(100));
-        threads.stop();
+        drop(pool);
         log::trace!("{} Stopping and checking", OffsetDateTime::now_utc().time(),);
         assert_eq!(
             *events.lock(),

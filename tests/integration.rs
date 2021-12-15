@@ -79,7 +79,6 @@ fn integration_2_thread_limited() {
     helper.wait_micros(10, 3, 'c');
     helper.wait_micros(10, 3, 'd');
     assert_recv!(helper, "abcd");
-    helper.drain();
 }
 
 #[test]
@@ -135,7 +134,6 @@ fn panic_in_job() {
     runner.send(PanicJob(Some(send))).unwrap();
     assert!(recv.recv_timeout(Duration::from_millis(500)).is_ok());
     thread::sleep(Duration::from_millis(1));
-    runner.stop()
 }
 
 struct TestHelper {
@@ -188,10 +186,6 @@ impl TestHelper {
 
     fn pause(&self, micros: u64) {
         thread::sleep(Duration::from_micros(micros));
-    }
-
-    fn drain(self) {
-        self.runner.stop()
     }
 }
 

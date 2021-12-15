@@ -76,13 +76,14 @@ where
     WorkerPool { stopping }
 }
 
+/// Graciously stops the pool when dropped, workers will stop as they become idle, but won't stop until the currently available tasks are completed. Supervisor will keep loading tasks until it goes idle and stops.
 pub struct WorkerPool {
     stopping: Arc<AtomicBool>,
 }
 
-impl WorkerPool {
+impl Drop for WorkerPool {
     /// Graciously stop the pool, workers will stop as they become idle, but won't stop until the currently available tasks are completed. Supervisor will keep loading tasks until it goes idle and stops. Returns immediately
-    pub fn stop(self) {
+    fn drop(&mut self) {
         self.stopping.store(true, atomic::Ordering::Relaxed);
     }
 }
@@ -771,7 +772,7 @@ mod runner_test {
         let pool = spawn(2, supervisor, Load, false);
 
         thread::sleep(Duration::from_millis(100));
-        pool.stop();
+        drop(pool);
         assert_eq!(
             *events.lock(),
             vec![
